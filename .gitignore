@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.log
+*.err
+.DS_Store
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Vite / tooling cache
+.vite/
+.cache/
+
+# Editor / OS noise
+.idea/
+.vscode/
+Thumbs.db
+
+# Test and coverage output
+coverage/

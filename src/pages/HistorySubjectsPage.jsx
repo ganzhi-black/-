@@ -87,7 +87,7 @@ export default function HistorySubjectsPage() {
                 <div className="subject-meta">
                   <span>
                     <FileText size={15} />
-                    {subject.chunkCount} 个资料切片
+                    {subject.generatedQuestionCount || 0} 道题已生成
                   </span>
                   <span>
                     <Clock3 size={15} />

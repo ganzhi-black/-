@@ -161,6 +161,12 @@ function removeMistake(draft, questionId) {
   draft.mistakes = draft.mistakes.filter((item) => item.question.id !== questionId);
 }
 
+function countGeneratedQuestions(state, subjectId) {
+  return state.sessions
+    .filter((session) => session.subjectId === subjectId)
+    .reduce((total, session) => total + (Array.isArray(session.questions) ? session.questions.length : 0), 0);
+}
+
 export const api = {
   async getDashboard() {
     await wait(180);
@@ -172,6 +178,7 @@ export const api = {
       subjects: state.subjects.map((subject) => ({
         ...subject,
         mistakeCount: activeMistakes.filter((item) => item.subjectId === subject.id).length,
+        generatedQuestionCount: countGeneratedQuestions(state, subject.id),
       })),
       totalMistakes: activeMistakes.length,
     };

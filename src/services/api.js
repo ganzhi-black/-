@@ -41,10 +41,17 @@ function normalizeSubject(subject) {
     sourceFileName: repairText(subject.sourceFileName || ""),
     sourceFileSize: subject.sourceFileSize || 0,
     chunkCount: subject.chunkCount || 0,
+    generatedQuestionCount: subject.generatedQuestionCount || 0,
     status: "ready",
     lastPracticeAt: subject.lastPracticeAt || null,
     mistakeCount: subject.mistakeCount || 0,
   };
+}
+
+function countGeneratedQuestions(state, subjectId) {
+  return state.sessions
+    .filter((session) => session.subjectId === subjectId)
+    .reduce((total, session) => total + (Array.isArray(session.questions) ? session.questions.length : 0), 0);
 }
 
 function upsertMistake(draft, question, result, answer) {
@@ -115,7 +122,8 @@ export const api = {
       const fallback = await mockApi.getDashboard();
       const normalizedSubjects = subjects.map(normalizeSubject);
       const subjectIds = new Set(normalizedSubjects.map((subject) => subject.id));
-      const mistakes = normalizeMistakes(loadState(), subjectIds);
+      const state = loadState();
+      const mistakes = normalizeMistakes(state, subjectIds);
       const mistakeCounts = mistakes.reduce((counts, mistake) => {
         counts.set(mistake.subjectId, (counts.get(mistake.subjectId) || 0) + 1);
         return counts;
@@ -125,6 +133,7 @@ export const api = {
         subjects: normalizedSubjects.map((subject) => ({
           ...subject,
           mistakeCount: mistakeCounts.get(subject.id) || 0,
+          generatedQuestionCount: countGeneratedQuestions(state, subject.id),
         })),
         totalMistakes: mistakes.length,
       };

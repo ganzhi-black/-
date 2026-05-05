@@ -1,6 +1,6 @@
 import pg from "pg";
 
-const DEV_USER_NICKNAME = "local-dev-user";
+const DEFAULT_VISITOR_ID = "anonymous-public";
 const DEFAULT_CHUNK_INSERT_BATCH_SIZE = 20;
 
 function toVectorSql(vector) {
@@ -45,13 +45,18 @@ function toChunk(row) {
   };
 }
 
-async function ensureDevUser(pool) {
-  const existing = await pool.query("select id from users where nickname = $1 limit 1", [DEV_USER_NICKNAME]);
+function normalizeVisitorId(visitorId) {
+  return String(visitorId || DEFAULT_VISITOR_ID).replace(/[^a-zA-Z0-9:_-]/g, "").slice(0, 80) || DEFAULT_VISITOR_ID;
+}
+
+async function ensureVisitorUser(pool, visitorId) {
+  const nickname = `visitor:${normalizeVisitorId(visitorId)}`;
+  const existing = await pool.query("select id from users where nickname = $1 limit 1", [nickname]);
   if (existing.rows[0]) {
     return existing.rows[0].id;
   }
 
-  const created = await pool.query("insert into users (nickname) values ($1) returning id", [DEV_USER_NICKNAME]);
+  const created = await pool.query("insert into users (nickname) values ($1) returning id", [nickname]);
   return created.rows[0].id;
 }
 
@@ -69,15 +74,19 @@ export async function createDbStore(databaseUrl) {
   });
 
   await ensureSchema(pool);
-  const userId = await ensureDevUser(pool);
+
+  async function getUserId(visitorId) {
+    return ensureVisitorUser(pool, visitorId);
+  }
 
   return {
     async health() {
       await pool.query("select 1");
-      return { userId };
+      return { ok: true };
     },
 
-    async createSubject({ name }) {
+    async createSubject({ visitorId, name }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           insert into subjects (user_id, name)
@@ -89,7 +98,8 @@ export async function createDbStore(databaseUrl) {
       return toSubject(result.rows[0]);
     },
 
-    async listSubjects() {
+    async listSubjects({ visitorId } = {}) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select
@@ -119,7 +129,8 @@ export async function createDbStore(databaseUrl) {
       return result.rows.map(toSubject);
     },
 
-    async getSubject(subjectId) {
+    async getSubject({ visitorId, subjectId }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select
@@ -148,12 +159,14 @@ export async function createDbStore(databaseUrl) {
       return result.rows[0] ? toSubject(result.rows[0]) : null;
     },
 
-    async deleteSubject(subjectId) {
+    async deleteSubject({ visitorId, subjectId }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query("delete from subjects where user_id = $1 and id = $2", [userId, subjectId]);
       return result.rowCount > 0;
     },
 
     async createDocument(documentInput) {
+      const userId = await getUserId(documentInput.visitorId);
       const result = await pool.query(
         `
           insert into documents (user_id, subject_id, file_name, mime_type, file_size, text_length, content_hash)
@@ -173,7 +186,8 @@ export async function createDbStore(databaseUrl) {
       return toDocument(result.rows[0]);
     },
 
-    async getDocumentHashesForSubject({ subjectId }) {
+    async getDocumentHashesForSubject({ visitorId, subjectId }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select distinct content_hash
@@ -189,8 +203,9 @@ export async function createDbStore(databaseUrl) {
       return result.rows.map((row) => row.content_hash);
     },
 
-    async getPriorQuestionsByDocumentHashes({ documentHashes, types, limit = 500 }) {
+    async getPriorQuestionsByDocumentHashes({ visitorId, documentHashes, types, limit = 500 }) {
       if (!documentHashes?.length) return [];
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select distinct title, type
@@ -209,8 +224,10 @@ export async function createDbStore(databaseUrl) {
       }));
     },
 
-    async addChunks(chunkInputs) {
+    async addChunks(input) {
+      const chunkInputs = Array.isArray(input) ? input : input.chunks;
       if (!chunkInputs.length) return [];
+      const userId = await getUserId(Array.isArray(input) ? undefined : input.visitorId);
 
       const batchSize = Math.max(1, Number(process.env.CHUNK_INSERT_BATCH_SIZE || DEFAULT_CHUNK_INSERT_BATCH_SIZE));
       const savedRows = [];
@@ -255,7 +272,8 @@ export async function createDbStore(databaseUrl) {
       return savedRows.map(toChunk);
     },
 
-    async getRecentQuestions({ subjectId, types, limit = 30 }) {
+    async getRecentQuestions({ visitorId, subjectId, types, limit = 30 }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select
@@ -294,7 +312,8 @@ export async function createDbStore(databaseUrl) {
       }));
     },
 
-    async searchChunks({ subjectId, queryEmbedding, limit = 5 }) {
+    async searchChunks({ visitorId, subjectId, queryEmbedding, limit = 5 }) {
+      const userId = await getUserId(visitorId);
       try {
         const result = await pool.query(
           `
@@ -340,7 +359,8 @@ export async function createDbStore(databaseUrl) {
       return fallback.rows.map(toChunk);
     },
 
-    async listChunks({ subjectId, limit = 1000 }) {
+    async listChunks({ visitorId, subjectId, limit = 1000 }) {
+      const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
           select
@@ -362,7 +382,8 @@ export async function createDbStore(databaseUrl) {
       return result.rows.map(toChunk);
     },
 
-    async saveQuestions({ subjectId, questions, documentHash = null }) {
+    async saveQuestions({ visitorId, subjectId, questions, documentHash = null }) {
+      const userId = await getUserId(visitorId);
       const saved = [];
       for (const question of questions) {
         const result = await pool.query(

@@ -40,6 +40,15 @@ const store = process.env.DATABASE_URL ? await createDbStore(process.env.DATABAS
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+function normalizeVisitorId(value) {
+  return String(value || "anonymous-public").replace(/[^a-zA-Z0-9:_-]/g, "").slice(0, 80) || "anonymous-public";
+}
+
+app.use((req, res, next) => {
+  req.visitorId = normalizeVisitorId(req.get("X-Visitor-Id"));
+  next();
+});
+
 function createSessionPayload({ subjectId, mode, questions }) {
   return {
     id: `ses_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -95,13 +104,13 @@ function hasTermMaterial(text) {
   return hasExplicitTermQuestion(text) || hasImplicitTermDefinition(text);
 }
 
-async function getPracticeSources({ subjectId, amount, types }) {
-  const cursorKey = `${subjectId}:${types.join(",")}`;
+async function getPracticeSources({ visitorId, subjectId, amount, types }) {
+  const cursorKey = `${visitorId}:${subjectId}:${types.join(",")}`;
   const cursor = practiceCursor.get(cursorKey) || 0;
   const poolSize = Math.max(120, amount * 20);
   const chunkPool = store.listChunks
-    ? await store.listChunks({ subjectId, limit: poolSize })
-    : await store.searchChunks({ subjectId, queryEmbedding: (await embedTexts([QUESTION_QUERY]))[0], limit: poolSize });
+    ? await store.listChunks({ visitorId, subjectId, limit: poolSize })
+    : await store.searchChunks({ visitorId, subjectId, queryEmbedding: (await embedTexts([QUESTION_QUERY]))[0], limit: poolSize });
 
   const wantsTerm = types.includes("term");
   if (wantsTerm) {
@@ -133,16 +142,16 @@ async function getPracticeSources({ subjectId, amount, types }) {
   return sources;
 }
 
-async function getOrGenerateQuestions({ subjectId, types, amount }) {
+async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
   const safeAmount = Math.min(50, Math.max(1, Number(amount) || 5));
   const requestedTypes = Array.isArray(types) && types.length ? types : ["single"];
-  const sources = await getPracticeSources({ subjectId, amount: safeAmount, types: requestedTypes });
-  const documentHashes = store.getDocumentHashesForSubject ? await store.getDocumentHashesForSubject({ subjectId }) : [];
+  const sources = await getPracticeSources({ visitorId, subjectId, amount: safeAmount, types: requestedTypes });
+  const documentHashes = store.getDocumentHashesForSubject ? await store.getDocumentHashesForSubject({ visitorId, subjectId }) : [];
   const priorQuestions = store.getPriorQuestionsByDocumentHashes
-    ? await store.getPriorQuestionsByDocumentHashes({ documentHashes, types: requestedTypes, limit: 500 })
+    ? await store.getPriorQuestionsByDocumentHashes({ visitorId, documentHashes, types: requestedTypes, limit: 500 })
     : [];
   const currentSubjectQuestions = store.getRecentQuestions
-    ? await store.getRecentQuestions({ subjectId, types: requestedTypes, limit: 500 })
+    ? await store.getRecentQuestions({ visitorId, subjectId, types: requestedTypes, limit: 500 })
     : [];
   const questions = await generateQuestionsFromSources({
     sources,
@@ -150,7 +159,7 @@ async function getOrGenerateQuestions({ subjectId, types, amount }) {
     amount: safeAmount,
     excludedQuestions: [...priorQuestions, ...currentSubjectQuestions],
   });
-  const savedQuestions = await store.saveQuestions({ subjectId, questions, documentHash: documentHashes[0] || null });
+  const savedQuestions = await store.saveQuestions({ visitorId, subjectId, questions, documentHash: documentHashes[0] || null });
 
   return {
     questions: savedQuestions,
@@ -177,7 +186,7 @@ app.post("/api/subjects", async (req, res, next) => {
     const name = String(req.body?.name || "").trim();
     if (!name) return res.status(400).json({ error: "Subject name is required." });
 
-    const subject = await store.createSubject({ name });
+    const subject = await store.createSubject({ visitorId: req.visitorId, name });
     res.status(201).json(subject);
   } catch (error) {
     next(error);
@@ -186,7 +195,7 @@ app.post("/api/subjects", async (req, res, next) => {
 
 app.get("/api/subjects", async (req, res, next) => {
   try {
-    res.json(await store.listSubjects());
+    res.json(await store.listSubjects({ visitorId: req.visitorId }));
   } catch (error) {
     next(error);
   }
@@ -194,7 +203,7 @@ app.get("/api/subjects", async (req, res, next) => {
 
 app.get("/api/subjects/:subjectId", async (req, res, next) => {
   try {
-    const subject = await store.getSubject(req.params.subjectId);
+    const subject = await store.getSubject({ visitorId: req.visitorId, subjectId: req.params.subjectId });
     if (!subject) return res.status(404).json({ error: "Subject not found." });
     res.json(subject);
   } catch (error) {
@@ -204,7 +213,7 @@ app.get("/api/subjects/:subjectId", async (req, res, next) => {
 
 app.delete("/api/subjects/:subjectId", async (req, res, next) => {
   try {
-    const deleted = await store.deleteSubject(req.params.subjectId);
+    const deleted = await store.deleteSubject({ visitorId: req.visitorId, subjectId: req.params.subjectId });
     if (!deleted) return res.status(404).json({ error: "Subject not found." });
     res.json({ ok: true });
   } catch (error) {
@@ -228,6 +237,7 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res, next) 
     const embeddedAt = performance.now();
 
     const document = await store.createDocument({
+      visitorId: req.visitorId,
       subjectId,
       fileName: repairMojibake(req.file.originalname),
       mimeType: req.file.mimetype,
@@ -236,14 +246,15 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res, next) 
       contentHash,
     });
 
-    const savedChunks = await store.addChunks(
-      chunks.map((chunk, index) => ({
+    const savedChunks = await store.addChunks({
+      visitorId: req.visitorId,
+      chunks: chunks.map((chunk, index) => ({
         ...chunk,
         subjectId,
         documentId: document.id,
         embedding: embeddings[index],
       })),
-    );
+    });
     const savedAt = performance.now();
     const timings = {
       extractMs: Math.round(extractedAt - startedAt),
@@ -281,7 +292,7 @@ app.post("/api/retrieval/search", async (req, res, next) => {
     if (!subjectId || !query) return res.status(400).json({ error: "subjectId and query are required." });
 
     const [queryEmbedding] = await embedTexts([query]);
-    const matches = await store.searchChunks({ subjectId, queryEmbedding, limit });
+    const matches = await store.searchChunks({ visitorId: req.visitorId, subjectId, queryEmbedding, limit });
 
     res.json({
       query,
@@ -314,7 +325,7 @@ app.post("/api/questions/generate", async (req, res, next) => {
 
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
 
-    const result = await getOrGenerateQuestions({ subjectId, types, amount });
+    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
     res.json(result);
   } catch (error) {
     next(error);
@@ -330,7 +341,7 @@ app.post("/api/sessions", async (req, res, next) => {
 
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
 
-    const result = await getOrGenerateQuestions({ subjectId, types, amount });
+    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
     res.status(201).json(createSessionPayload({ subjectId, mode, questions: result.questions }));
   } catch (error) {
     next(error);

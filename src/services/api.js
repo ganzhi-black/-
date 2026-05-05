@@ -3,9 +3,34 @@ import { loadState, updateState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8787";
+const VISITOR_ID_KEY = "qimoshua:visitor-id";
+
+function createVisitorId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `visitor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function getVisitorId() {
+  try {
+    const existing = window.localStorage.getItem(VISITOR_ID_KEY);
+    if (existing) return existing;
+
+    const visitorId = createVisitorId();
+    window.localStorage.setItem(VISITOR_ID_KEY, visitorId);
+    return visitorId;
+  } catch {
+    return createVisitorId();
+  }
+}
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Visitor-Id", getVisitorId());
+
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers,
+  });
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {

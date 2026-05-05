@@ -1,14 +1,17 @@
-import { ArrowRight, Check, FileQuestion, ListChecks, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, FileQuestion, ListChecks, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import EmptyState from "../components/EmptyState.jsx";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
-import { api } from "../services/mockApi.js";
+import { api } from "../services/api.js";
+import { repairText } from "../utils/textRepair.js";
 
 const typeOptions = [
-  { id: "single", label: "选择题", desc: "快速判断掌握度" },
-  { id: "short", label: "简答题", desc: "适合考点背诵" },
-  { id: "essay", label: "论述题", desc: "训练大题表达" },
+  { id: "single", label: "单选题", desc: "适合检查概念和细节记忆" },
+  { id: "term", label: "名词解释", desc: "仅在资料含名词解释题时生成" },
+  { id: "short", label: "简答题", desc: "200-400 字，定义/概念加核心要点" },
+  { id: "essay", label: "论述题", desc: "500 字以上，需要分析阐释和展开" },
 ];
 
 export default function SettingsPage() {
@@ -17,11 +20,19 @@ export default function SettingsPage() {
   const [subject, setSubject] = useState(null);
   const [types, setTypes] = useState(["single", "short", "essay"]);
   const [amount, setAmount] = useState(6);
-  const [mode, setMode] = useState("relaxed");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    api.getSubject(subjectId).then(setSubject);
+    setLoadError("");
+    api
+      .getSubject(subjectId)
+      .then((nextSubject) => {
+        if (nextSubject) setSubject(nextSubject);
+        else setLoadError("没有找到这门科目，可能已经被删除。");
+      })
+      .catch((nextError) => setLoadError(nextError.message));
   }, [subjectId]);
 
   function toggleType(type) {
@@ -29,14 +40,28 @@ export default function SettingsPage() {
   }
 
   async function start() {
+    if (!subject.chunkCount) {
+      setError("这门科目还没有可用的资料切片，请先上传资料。");
+      return;
+    }
     setLoading(true);
-    const session = await api.createSession({
-      subjectId,
-      types: types.length ? types : ["single"],
-      amount: Math.min(30, Math.max(1, Number(amount) || 1)),
-      mode,
-    });
-    navigate(`/quiz/${session.id}`);
+    setError("");
+    try {
+      const session = await api.createSession({
+        subjectId,
+        types: types.length ? types : ["single"],
+        amount: Math.min(50, Math.max(1, Number(amount) || 1)),
+        mode: "relaxed",
+      });
+      navigate(`/quiz/${session.id}`);
+    } catch (nextError) {
+      setError(nextError.message);
+      setLoading(false);
+    }
+  }
+
+  if (loadError) {
+    return <EmptyState title="科目加载失败" description={loadError} actionText="返回已上传资料" to="/subjects/history" />;
   }
 
   if (!subject) return <div className="skeleton-page" />;
@@ -46,7 +71,7 @@ export default function SettingsPage() {
       <section className="page-title">
         <p className="eyebrow muted">练习设置</p>
         <h1>{subject.name}</h1>
-        <p>{subject.sourceFileName}</p>
+        <p>{repairText(subject.sourceFileName)}</p>
       </section>
 
       <section className="setting-card">
@@ -68,33 +93,32 @@ export default function SettingsPage() {
       <section className="setting-card">
         <div className="setting-title">
           <SlidersHorizontal size={20} />
-          <h2>题量与模式</h2>
+          <h2>题量</h2>
         </div>
         <label className="field compact-field">
           <span>题量</span>
-          <input type="number" min="1" max="30" value={amount} onChange={(event) => setAmount(event.target.value)} />
+          <input type="number" min="1" max="50" value={amount} onChange={(event) => setAmount(event.target.value)} />
         </label>
-        <div className="segmented">
-          <button type="button" className={mode === "strict" ? "active" : ""} onClick={() => setMode("strict")}>
-            默写严格
-          </button>
-          <button type="button" className={mode === "relaxed" ? "active" : ""} onClick={() => setMode("relaxed")}>
-            复习宽松
-          </button>
-        </div>
       </section>
 
       <div className="summary-strip">
         <Metric label="资料切片" value={subject.chunkCount} />
-        <Metric label="状态" value="可练习" tone="good" />
+        <Metric label="资料状态" value={subject.chunkCount ? "可出题" : "未就绪"} tone={subject.chunkCount ? "good" : "warn"} />
       </div>
+
+      {error && (
+        <div className="notice error">
+          <AlertCircle size={17} />
+          {error}
+        </div>
+      )}
 
       <LoadingButton className="primary-button full" loading={loading} onClick={start}>
         开始练习
       </LoadingButton>
       <Link className="secondary-button full" to="/mistakes">
         <ListChecks size={18} />
-        查看错题本
+        查看错题
         <ArrowRight size={18} />
       </Link>
     </div>

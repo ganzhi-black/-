@@ -165,13 +165,15 @@ export const api = {
   async getDashboard() {
     await wait(180);
     const state = loadState();
+    const subjectIds = new Set(state.subjects.map((subject) => subject.id));
+    const activeMistakes = state.mistakes.filter((item) => subjectIds.has(item.subjectId));
     return {
       user: state.user,
       subjects: state.subjects.map((subject) => ({
         ...subject,
-        mistakeCount: state.mistakes.filter((item) => item.subjectId === subject.id).length,
+        mistakeCount: activeMistakes.filter((item) => item.subjectId === subject.id).length,
       })),
-      totalMistakes: state.mistakes.length,
+      totalMistakes: activeMistakes.length,
     };
   },
 

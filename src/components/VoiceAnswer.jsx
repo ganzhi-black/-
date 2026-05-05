@@ -1,66 +1,184 @@
 import { Mic, RotateCcw, Square } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { createRealtimeAudioSocket } from "../services/api.js";
 
-function getSpeechRecognition() {
-  if (typeof window === "undefined") return null;
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const TARGET_SAMPLE_RATE = 16000;
+
+function getRecordingSupport() {
+  if (typeof window === "undefined") return false;
+  return Boolean(window.AudioContext || window.webkitAudioContext) && Boolean(navigator.mediaDevices?.getUserMedia);
+}
+
+function downsampleTo16k(input, sourceSampleRate) {
+  if (sourceSampleRate === TARGET_SAMPLE_RATE) return input;
+
+  const ratio = sourceSampleRate / TARGET_SAMPLE_RATE;
+  const outputLength = Math.floor(input.length / ratio);
+  const output = new Float32Array(outputLength);
+
+  for (let i = 0; i < outputLength; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(Math.floor((i + 1) * ratio), input.length);
+    let sum = 0;
+    for (let j = start; j < end; j += 1) sum += input[j];
+    output[i] = sum / Math.max(1, end - start);
+  }
+
+  return output;
+}
+
+function floatTo16BitPcm(input) {
+  const output = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, input[i]));
+    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return output.buffer;
+}
+
+function joinAnswerParts(parts) {
+  return parts.filter(Boolean).join(parts.length > 1 ? "\n" : "");
 }
 
 export default function VoiceAnswer({ value, onChange, disabled }) {
   const [recording, setRecording] = useState(false);
-  const [supported, setSupported] = useState(() => Boolean(getSpeechRecognition()));
-  const recorderRef = useRef(null);
-  const recognitionRef = useRef(null);
+  const [connecting, setConnecting] = useState(false);
+  const [supported, setSupported] = useState(getRecordingSupport);
+  const [error, setError] = useState("");
+  const audioContextRef = useRef(null);
+  const sourceRef = useRef(null);
+  const processorRef = useRef(null);
+  const streamRef = useRef(null);
+  const socketRef = useRef(null);
+  const baseTextRef = useRef("");
+  const finalTextRef = useRef("");
+  const partialTextRef = useRef("");
 
   const hint = useMemo(() => {
-    if (!supported) return "当前浏览器不支持语音转文字，请直接输入答案";
-    return recording ? "松开结束" : "按住说出答案";
-  }, [recording, supported]);
+    if (!supported) return "当前浏览器不支持录音，请换 Chrome 或 Edge";
+    if (connecting) return "正在连接语音模型";
+    return recording ? "松开结束录音" : "按住实时转写";
+  }, [connecting, recording, supported]);
 
-  useEffect(() => {
-    const SpeechRecognition = getSpeechRecognition();
-    if (!SpeechRecognition) {
-      setSupported(false);
-      return;
+  function renderTranscript() {
+    const nextText = joinAnswerParts([baseTextRef.current.trim(), finalTextRef.current.trim(), partialTextRef.current.trim()]);
+    onChange(nextText);
+  }
+
+  function cleanupAudio() {
+    processorRef.current?.disconnect();
+    sourceRef.current?.disconnect();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    audioContextRef.current?.close();
+    processorRef.current = null;
+    sourceRef.current = null;
+    streamRef.current = null;
+    audioContextRef.current = null;
+  }
+
+  function finishSocket() {
+    const socket = socketRef.current;
+    if (!socket) return;
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "finish" }));
+      setTimeout(() => socket.close(), 300);
+    } else {
+      socket.close();
     }
-    const recognition = new SpeechRecognition();
-    recognition.lang = "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.onresult = (event) => {
-      let text = "";
-      for (let i = 0; i < event.results.length; i += 1) {
-        text += event.results[i][0].transcript;
-      }
-      onChange(text);
-    };
-    recognition.onerror = () => setSupported(false);
-    recognitionRef.current = recognition;
-    return () => recognition.stop();
-  }, [onChange]);
+    socketRef.current = null;
+  }
 
-  async function start() {
-    if (disabled || recording || !supported) return;
-    setRecording(true);
+  async function start(event) {
+    event?.preventDefault();
+    if (disabled || recording || connecting || !supported) return;
+
+    setError("");
+    setConnecting(true);
+    baseTextRef.current = value || "";
+    finalTextRef.current = "";
+    partialTextRef.current = "";
+
     try {
-      const stream = await navigator.mediaDevices?.getUserMedia({ audio: true });
-      if (stream && window.MediaRecorder) {
-        recorderRef.current = new MediaRecorder(stream);
-        recorderRef.current.start();
-      }
-      recognitionRef.current?.start();
-    } catch {
-      setSupported(false);
+      const socket = createRealtimeAudioSocket();
+      socket.binaryType = "arraybuffer";
+      socketRef.current = socket;
+
+      socket.onmessage = (messageEvent) => {
+        const message = JSON.parse(messageEvent.data);
+        if (message.type === "ready") {
+          setConnecting(false);
+          setRecording(true);
+          return;
+        }
+
+        if (message.type === "partial") {
+          partialTextRef.current = message.text || "";
+          renderTranscript();
+          return;
+        }
+
+        if (message.type === "final") {
+          const text = String(message.text || "").trim();
+          if (text) {
+            finalTextRef.current = joinAnswerParts([finalTextRef.current.trim(), text]);
+            partialTextRef.current = "";
+            renderTranscript();
+          }
+          return;
+        }
+
+        if (message.type === "error") {
+          setError(message.error || "语音识别失败，请稍后再试");
+          stop();
+        }
+      };
+
+      socket.onerror = () => {
+        setError("语音服务连接失败，请检查 Qwen 配置");
+        stop();
+      };
+
+      await new Promise((resolve, reject) => {
+        socket.onopen = resolve;
+        socket.onclose = () => reject(new Error("语音连接已关闭"));
+      });
+
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const audioContext = new AudioContext();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      processor.onaudioprocess = (audioEvent) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        const input = audioEvent.inputBuffer.getChannelData(0);
+        const downsampled = downsampleTo16k(input, audioContext.sampleRate);
+        socket.send(floatTo16BitPcm(downsampled));
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      audioContextRef.current = audioContext;
+      sourceRef.current = source;
+      processorRef.current = processor;
+      streamRef.current = stream;
+    } catch (startError) {
+      setError(startError.message || "无法启动录音");
+      setConnecting(false);
       setRecording(false);
+      setSupported(getRecordingSupport());
+      cleanupAudio();
+      finishSocket();
     }
   }
 
-  function stop() {
-    if (!recording) return;
+  function stop(event) {
+    event?.preventDefault();
+    if (!recording && !connecting) return;
     setRecording(false);
-    recognitionRef.current?.stop();
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
-    recorderRef.current?.stream?.getTracks().forEach((track) => track.stop());
+    setConnecting(false);
+    cleanupAudio();
+    finishSocket();
   }
 
   return (
@@ -68,11 +186,10 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
       <button
         type="button"
         className={`mic-button ${recording ? "recording" : ""}`}
-        onMouseDown={start}
-        onMouseUp={stop}
-        onMouseLeave={stop}
-        onTouchStart={start}
-        onTouchEnd={stop}
+        onPointerDown={start}
+        onPointerUp={stop}
+        onPointerCancel={stop}
+        onPointerLeave={stop}
         disabled={disabled || !supported}
         aria-label={hint}
       >
@@ -87,18 +204,18 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
       </button>
       <div className="voice-copy">
         <strong>{hint}</strong>
-        <span>转写后可继续修改，再提交批改</span>
+        <span>{error || "按住说话，文字会实时出现在答案框里"}</span>
       </div>
       <textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="语音转写会显示在这里，也可以直接输入你的答案"
+        placeholder="也可以直接输入答案，或按住麦克风实时语音作答"
         rows={7}
         disabled={disabled}
       />
       <button type="button" className="ghost-button compact" onClick={() => onChange("")} disabled={disabled || !value}>
         <RotateCcw size={16} />
-        重新录制
+        清空重答
       </button>
     </div>
   );

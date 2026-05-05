@@ -3,15 +3,98 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
-import { api } from "../services/mockApi.js";
+import { api } from "../services/api.js";
 import { updateState } from "../services/storage.js";
 import { percent } from "../utils/format.js";
+import { repairText } from "../utils/textRepair.js";
+
+const SENTENCE_END = /[。！？!?；;]/;
+
+function normalizeText(text = "") {
+  return repairText(String(text).replace(/\s+/g, " ").trim());
+}
+
+function tokenize(text = "") {
+  const normalized = normalizeText(text);
+  const chineseTerms = normalized.match(/[\u4e00-\u9fa5]{2,12}/g) || [];
+  const englishTerms = normalized.match(/[a-zA-Z0-9]{3,}/g) || [];
+  return [...chineseTerms, ...englishTerms]
+    .filter((item) => item.length >= 2)
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 12);
+}
+
+function previousSentenceStart(text, index) {
+  for (let i = Math.max(0, index - 1); i >= 0; i -= 1) {
+    if (SENTENCE_END.test(text[i]) || text[i] === "\n") {
+      return Math.min(text.length, i + 1);
+    }
+  }
+  return 0;
+}
+
+function nextSentenceEnd(text, index) {
+  for (let i = Math.max(0, index); i < text.length; i += 1) {
+    if (SENTENCE_END.test(text[i]) || text[i] === "\n") {
+      return i + 1;
+    }
+  }
+  return Math.min(text.length, index);
+}
+
+function sentenceExcerpt(sourceText, hit, minLength = 180, maxLength = 360) {
+  const text = normalizeText(sourceText);
+  if (!text) return "";
+
+  let start = previousSentenceStart(text, hit);
+  let end = nextSentenceEnd(text, Math.max(hit + minLength, start + minLength));
+
+  if (end - start > maxLength) {
+    end = nextSentenceEnd(text, start + maxLength);
+  }
+  if (end <= start) {
+    end = Math.min(text.length, start + maxLength);
+  }
+
+  return text.slice(start, end).trim();
+}
+
+function sourceExcerpt(question, result) {
+  const sourceText = normalizeText(result?.sourceText);
+  const evidenceQuote = normalizeText(result?.evidenceQuote);
+
+  if (evidenceQuote && sourceText) {
+    const quoteIndex = sourceText.indexOf(evidenceQuote);
+    if (quoteIndex >= 0) return sentenceExcerpt(sourceText, quoteIndex, evidenceQuote.length, 360);
+  }
+
+  if (evidenceQuote) return evidenceQuote;
+  if (!sourceText) return "";
+
+  const searchTerms = tokenize(
+    [
+      question?.title,
+      question?.correctAnswer,
+      question?.explanation,
+      ...(question?.options || []).map((item) => item.text),
+      ...(question?.keyPoints || []),
+    ].join(" "),
+  );
+
+  const hit = searchTerms
+    .map((term) => sourceText.indexOf(term))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+
+  return sentenceExcerpt(sourceText, hit === undefined ? 0 : hit);
+}
 
 export default function ResultPage() {
   const { sessionId, questionIndex } = useParams();
   const navigate = useNavigate();
   const [session, setSession] = useState(null);
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [fullSourceOpen, setFullSourceOpen] = useState(false);
   const [finishing, setFinishing] = useState(false);
 
   useEffect(() => {
@@ -21,6 +104,8 @@ export default function ResultPage() {
   const index = Number(questionIndex);
   const record = useMemo(() => session?.answers.find((item) => item.questionIndex === index), [session, index]);
   const result = record?.result;
+  const excerpt = useMemo(() => sourceExcerpt(record?.question, result), [record, result]);
+  const fullSource = normalizeText(result?.sourceText);
 
   async function next() {
     if (index >= session.questions.length - 1) {
@@ -56,8 +141,8 @@ export default function ResultPage() {
       <section className={`result-hero ${result.isCorrect ? "good" : "bad"}`}>
         <div className="result-icon">{result.isCorrect ? <CheckCircle2 size={30} /> : <XCircle size={30} />}</div>
         <p className="eyebrow muted">单题结果</p>
-        <h1>{subjective ? `准确率 ${percent(result.accuracy)}` : result.isCorrect ? "回答正确" : "回答错误"}</h1>
-        <p>{result.advice}</p>
+        <h1>{subjective ? `得分 ${percent(result.accuracy)}` : result.isCorrect ? "回答正确" : "回答错误"}</h1>
+        <p>{normalizeText(result.advice)}</p>
       </section>
 
       <div className="summary-strip">
@@ -67,31 +152,35 @@ export default function ResultPage() {
 
       {subjective && (
         <section className="feedback-card">
-          <h2>要点核对</h2>
+          <h2>答案要点</h2>
           <div className="point-group">
             <h3>
               <CheckCircle2 size={18} />
-              你提到的要点
+              已覆盖要点
             </h3>
-            {result.coveredPoints.map((point) => (
-              <p className="point good" key={point}>
-                {point}
-              </p>
-            ))}
+            {result.coveredPoints.length ? (
+              result.coveredPoints.map((point) => (
+                <p className="point good" key={point}>
+                  {normalizeText(point)}
+                </p>
+              ))
+            ) : (
+              <p className="point bad">暂未覆盖有效要点</p>
+            )}
           </div>
           <div className="point-group">
             <h3>
               <XCircle size={18} />
-              你漏掉的要点
+              遗漏要点
             </h3>
             {result.missedPoints.length ? (
               result.missedPoints.map((point) => (
                 <p className="point bad" key={point}>
-                  {point}
+                  {normalizeText(point)}
                 </p>
               ))
             ) : (
-              <p className="point good">本题关键点覆盖完整</p>
+              <p className="point good">没有明显遗漏要点</p>
             )}
           </div>
         </section>
@@ -99,17 +188,33 @@ export default function ResultPage() {
 
       <section className="source-card">
         <button type="button" onClick={() => setSourceOpen((value) => !value)}>
-          <span>原文出处：{result.sourceLocation}</span>
+          <span>原文出处</span>
           <ChevronDown size={18} className={sourceOpen ? "up" : ""} />
         </button>
-        {sourceOpen && <p>{result.sourceText}</p>}
+        {sourceOpen && (
+          <div className="source-body">
+            <p>{excerpt}</p>
+            {fullSource.length > excerpt.length && (
+              <>
+                <button className="text-link source-toggle" type="button" onClick={() => setFullSourceOpen((value) => !value)}>
+                  {fullSourceOpen ? "收起完整片段" : "查看完整片段"}
+                </button>
+                {fullSourceOpen && (
+                  <div className="source-full" onWheel={(event) => event.stopPropagation()} onTouchMove={(event) => event.stopPropagation()}>
+                    <p>{fullSource}</p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </section>
 
       <div className="action-row">
         {subjective && (
           <button className="secondary-button" type="button" onClick={redo}>
             <RotateCcw size={18} />
-            再说一遍
+            重新作答
           </button>
         )}
         <LoadingButton className="primary-button grow" loading={finishing} onClick={next}>

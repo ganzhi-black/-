@@ -12,11 +12,15 @@ dist/
 # Vite / tooling cache
 .vite/
 .cache/
+.tmp/
+.venv/
+server/python-vendor/
 
 # Editor / OS noise
 .idea/
 .vscode/
 Thumbs.db
+~$*.docx
 
 # Test and coverage output
 coverage/

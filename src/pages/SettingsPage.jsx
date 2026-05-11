@@ -113,7 +113,7 @@ export default function SettingsPage() {
         </div>
       )}
 
-      <LoadingButton className="primary-button full" loading={loading} onClick={start}>
+      <LoadingButton className="primary-button full" loading={loading} loadingText="出题中，请您稍作等待" onClick={start}>
         开始练习
       </LoadingButton>
       <Link className="secondary-button full" to="/mistakes">

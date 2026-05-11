@@ -1,22 +1,21 @@
-import { AlertCircle, ArrowRight, CheckCircle2, Clock3, FileText, History, UploadCloud } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, ArrowRight, Clock3, History, UploadCloud } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import { api } from "../services/api.js";
 
-const stages = ["文本提取中", "智能切片中", "向量化入库中"];
 const acceptedTypes = [".pdf", ".doc", ".docx", ".txt", ".md"];
+const defaultQuestionTypes = ["single", "short", "essay"];
+const defaultQuestionAmount = 6;
 
 export default function UploadPage() {
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
-  const [stage, setStage] = useState(-1);
   const [loading, setLoading] = useState(false);
   const [dashboard, setDashboard] = useState(null);
 
-  const derivedName = useMemo(() => file?.name?.replace(/\.(pdf|doc|docx|txt|md)$/i, "") || "", [file]);
   const subjectCount = dashboard?.subjects?.length || 0;
 
   useEffect(() => {
@@ -43,7 +42,7 @@ export default function UploadPage() {
       return;
     }
     setFile(nextFile);
-    setName((current) => current || derivedName || nextFile.name.replace(/\.(pdf|doc|docx|txt|md)$/i, ""));
+    setName((current) => current || nextFile.name.replace(/\.(pdf|doc|docx|txt|md)$/i, ""));
   }
 
   async function submit(event) {
@@ -56,13 +55,23 @@ export default function UploadPage() {
       setError("请给这个科目起一个名字。");
       return;
     }
+
     setLoading(true);
-    for (let i = 0; i < stages.length; i += 1) {
-      setStage(i);
-      await new Promise((resolve) => setTimeout(resolve, 1200 + Math.random() * 500));
+    setError("");
+
+    try {
+      const subject = await api.createSubject({ name: name.trim().slice(0, 20), file });
+      const session = await api.createSession({
+        subjectId: subject.id,
+        types: defaultQuestionTypes,
+        amount: defaultQuestionAmount,
+        mode: "relaxed",
+      });
+      navigate(`/quiz/${session.id}`);
+    } catch (nextError) {
+      setError(nextError.message);
+      setLoading(false);
     }
-    const subject = await api.createSubject({ name: name.trim().slice(0, 20), file });
-    navigate(`/subjects/${subject.id}/settings`);
   }
 
   return (
@@ -100,19 +109,8 @@ export default function UploadPage() {
           </div>
         )}
 
-        {stage >= 0 && (
-          <div className="stage-list">
-            {stages.map((item, index) => (
-              <div className={`stage-item ${index <= stage ? "active" : ""}`} key={item}>
-                {index < stage ? <CheckCircle2 size={18} /> : <FileText size={18} />}
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <LoadingButton className="primary-button full" loading={loading} type="submit">
-          开始解析入库
+        <LoadingButton className="primary-button full" loading={loading} loadingText="出题中，请您稍作等待" type="submit">
+          {loading ? "出题中，请您稍作等待" : "开始出题"}
         </LoadingButton>
       </form>
 

@@ -94,7 +94,6 @@ export default function ResultPage() {
   const navigate = useNavigate();
   const [session, setSession] = useState(null);
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [fullSourceOpen, setFullSourceOpen] = useState(false);
   const [finishing, setFinishing] = useState(false);
 
   useEffect(() => {
@@ -105,7 +104,6 @@ export default function ResultPage() {
   const record = useMemo(() => session?.answers.find((item) => item.questionIndex === index), [session, index]);
   const result = record?.result;
   const excerpt = useMemo(() => sourceExcerpt(record?.question, result), [record, result]);
-  const fullSource = normalizeText(result?.sourceText);
 
   async function next() {
     if (index >= session.questions.length - 1) {
@@ -194,23 +192,11 @@ export default function ResultPage() {
         {sourceOpen && (
           <div className="source-body">
             <p>{excerpt}</p>
-            {fullSource.length > excerpt.length && (
-              <>
-                <button className="text-link source-toggle" type="button" onClick={() => setFullSourceOpen((value) => !value)}>
-                  {fullSourceOpen ? "收起完整片段" : "查看完整片段"}
-                </button>
-                {fullSourceOpen && (
-                  <div className="source-full" onWheel={(event) => event.stopPropagation()} onTouchMove={(event) => event.stopPropagation()}>
-                    <p>{fullSource}</p>
-                  </div>
-                )}
-              </>
-            )}
           </div>
         )}
       </section>
 
-      <div className="action-row">
+      <div className="action-row result-action-row">
         {subjective && (
           <button className="secondary-button" type="button" onClick={redo}>
             <RotateCcw size={18} />

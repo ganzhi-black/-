@@ -1,4 +1,4 @@
-import { CirclePlus, Home, LibraryBig } from "lucide-react";
+import { CirclePlus, Home, LibraryBig, Plus } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 
 function BrandLogo() {
@@ -20,6 +20,14 @@ export default function AppShell({ children }) {
 
   return (
     <div className={`app-shell ${isHome ? "home-shell" : ""}`}>
+      <svg className="pencil-filter-svg" aria-hidden="true" focusable="false">
+        <defs>
+          <filter id="pencil-roughen">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="12" result="noise" />
+            <feDisplacementMap in="SourceGraphic" in2="noise" scale="0.45" xChannelSelector="R" yChannelSelector="G" />
+          </filter>
+        </defs>
+      </svg>
       <header className="topbar">
         <NavLink to="/" className="brand" aria-label="回到首页">
           <span className="brand-mark">
@@ -32,7 +40,7 @@ export default function AppShell({ children }) {
         </NavLink>
         {!isHome && (
           <NavLink to="/upload" className="icon-button" aria-label="新建科目">
-            <CirclePlus size={20} />
+            <Plus size={20} />
           </NavLink>
         )}
       </header>

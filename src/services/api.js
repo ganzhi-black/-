@@ -2,7 +2,8 @@ import { api as mockApi } from "./mockApi.js";
 import { loadState, updateState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8787";
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
+export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? "" : "http://localhost:8787");
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
 
 function createVisitorId() {
@@ -52,7 +53,8 @@ export async function transcribeAudio(audioBlob) {
 }
 
 export function createRealtimeAudioSocket() {
-  const wsBaseUrl = API_BASE_URL.replace(/^http/i, (protocol) => (protocol.toLowerCase() === "https" ? "wss" : "ws"));
+  const socketHttpBaseUrl = API_BASE_URL || window.location.origin;
+  const wsBaseUrl = socketHttpBaseUrl.replace(/^http/i, (protocol) => (protocol.toLowerCase() === "https" ? "wss" : "ws"));
   return new WebSocket(`${wsBaseUrl}/api/audio/realtime`);
 }
 

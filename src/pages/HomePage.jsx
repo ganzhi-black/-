@@ -1,4 +1,4 @@
-import { ArrowRight, FolderPlus, LibraryBig, Sparkles } from "lucide-react";
+import { ArrowRight, FolderPlus, LibraryBig } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../services/api.js";
@@ -20,10 +20,6 @@ export default function HomePage() {
     <div className="home-clean">
       <section className="home-hero-clean">
         <div className="home-hero-copy">
-          <span className="home-kicker">
-            <Sparkles size={16} />
-            为中国大学生期末周而做
-          </span>
           <h1>把你的复习资料，变成可训练的题库。</h1>
           <p>上传你的复习资料，生成选择题、简答题、论述题。主观题支持语音作答+AI批改，错题自动整理进入错题本。</p>
         </div>

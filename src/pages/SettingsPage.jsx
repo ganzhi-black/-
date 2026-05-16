@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import EmptyState from "../components/EmptyState.jsx";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
-import { api } from "../services/api.js";
+import { api, track } from "../services/api.js";
 import { repairText } from "../utils/textRepair.js";
 
 const typeOptions = [
@@ -116,7 +116,7 @@ export default function SettingsPage() {
       <LoadingButton className="primary-button full" loading={loading} loadingText="出题中，请您稍作等待" onClick={start}>
         开始练习
       </LoadingButton>
-      <Link className="secondary-button full" to="/mistakes">
+      <Link className="secondary-button full" to="/mistakes" onClick={() => track("subject_mistakes_clicked", { subjectId })}>
         <ListChecks size={18} />
         查看错题
         <ArrowRight size={18} />

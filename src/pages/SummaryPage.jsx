@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
-import { api } from "../services/api.js";
+import { api, track } from "../services/api.js";
 
 export default function SummaryPage() {
   const { sessionId } = useParams();
@@ -29,6 +29,16 @@ export default function SummaryPage() {
       mistakeCount: session.answers.filter((item) => !item.result.isCorrect).length,
     };
   }, [session]);
+
+  useEffect(() => {
+    if (session && summary?.mistakeCount > 0) {
+      track("summary_mistakes_cta_viewed", {
+        sessionId,
+        subjectId: session.subjectId,
+        mistakeCount: summary.mistakeCount,
+      });
+    }
+  }, [session, summary?.mistakeCount, sessionId]);
 
   async function again() {
     setLoading(true);
@@ -63,7 +73,7 @@ export default function SummaryPage() {
         <RotateCcw size={18} />
         再练一组
       </LoadingButton>
-      <Link className="secondary-button full" to="/mistakes">
+      <Link className="secondary-button full" to="/mistakes" onClick={() => track("summary_mistakes_clicked", { sessionId, subjectId: session.subjectId })}>
         <LibraryBig size={18} />
         查看错题本
         <ArrowRight size={18} />

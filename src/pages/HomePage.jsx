@@ -1,7 +1,7 @@
 import { ArrowRight, FolderPlus, LibraryBig } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../services/api.js";
+import { api, track } from "../services/api.js";
 
 export default function HomePage() {
   const [dashboard, setDashboard] = useState(null);
@@ -35,7 +35,7 @@ export default function HomePage() {
             </span>
             <ArrowRight size={20} />
           </Link>
-          <Link className="home-module" to="/mistakes">
+          <Link className="home-module" to="/mistakes" onClick={() => track("home_mistakes_clicked")}>
             <span className="home-module-icon">
               <LibraryBig size={24} />
             </span>

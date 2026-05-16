@@ -24,3 +24,19 @@ Thumbs.db
 
 # Test and coverage output
 coverage/
+
+# Large local product/demo artifacts
+*.mp4
+*.mov
+*.avi
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.pdf
+*.svg
+
+# Separate frontend deployment bundle
+.railway-frontend/

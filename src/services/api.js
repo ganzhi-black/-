@@ -28,10 +28,16 @@ async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Visitor-Id", getVisitorId());
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      credentials: "include",
+    });
+  } catch (error) {
+    throw new Error("后端服务没有连上，请先启动后端服务，或检查数据库连接。");
+  }
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
@@ -39,6 +45,23 @@ async function request(path, options = {}) {
   }
 
   return payload;
+}
+
+export async function track(eventName, properties = {}) {
+  try {
+    await request("/api/analytics/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventName,
+        pagePath: window.location.hash || window.location.pathname,
+        sessionId: properties.sessionId || "",
+        properties,
+      }),
+    });
+  } catch (error) {
+    console.warn("Analytics event skipped:", error.message);
+  }
 }
 
 export async function transcribeAudio(audioBlob) {
@@ -143,6 +166,45 @@ async function uploadDocument({ subjectId, file }) {
 }
 
 export const api = {
+  async register({ email, password, nickname }) {
+    const payload = await request("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, nickname }),
+    });
+    await track("register_succeeded");
+    return payload.user;
+  },
+
+  async login({ email, password }) {
+    const payload = await request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    await track("login_succeeded");
+    return payload.user;
+  },
+
+  async logout() {
+    await request("/api/auth/logout", {
+      method: "POST",
+    });
+  },
+
+  async getCurrentUser() {
+    const payload = await request("/api/auth/me");
+    return payload.user;
+  },
+
+  async getAdminMetrics() {
+    return request("/api/admin/metrics");
+  },
+
+  async getAdminEvents(limit = 50) {
+    return request(`/api/admin/events?limit=${encodeURIComponent(limit)}`);
+  },
+
   async getDashboard() {
     try {
       const subjects = await request("/api/subjects");
@@ -171,6 +233,10 @@ export const api = {
   },
 
   async createSubject({ name, file }) {
+    await track("upload_clicked", {
+      fileType: file?.name?.split(".").pop()?.toLowerCase() || "",
+      fileSize: file?.size || 0,
+    });
     const subject = await request("/api/subjects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -178,6 +244,12 @@ export const api = {
     });
 
     const uploaded = file ? await uploadDocument({ subjectId: subject.id, file }) : null;
+    await track("upload_succeeded", {
+      subjectId: subject.id,
+      fileType: file?.name?.split(".").pop()?.toLowerCase() || "",
+      fileSize: file?.size || 0,
+      chunkCount: uploaded?.chunkCount || 0,
+    });
     window.dispatchEvent(new Event("qimoshua:state-change"));
 
     return normalizeSubject({
@@ -224,6 +296,10 @@ export const api = {
 
   async createSession({ subjectId, types, amount, mode, retryQuestions = [] }) {
     if (retryQuestions.length > 0) {
+      await track("mistake_retry_started", {
+        subjectId,
+        amount: retryQuestions.length,
+      });
       return mockApi.createSession({ subjectId, types, amount, mode, retryQuestions });
     }
 
@@ -232,6 +308,13 @@ export const api = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subjectId, types, amount, mode }),
+      });
+      await track("practice_started", {
+        sessionId: session.id,
+        subjectId,
+        types,
+        amount,
+        mode,
       });
 
       updateState((draft) => {
@@ -246,19 +329,35 @@ export const api = {
     }
   },
 
-  getSession: mockApi.getSession,
+  async getSession(sessionId) {
+    try {
+      const session = await request(`/api/sessions/${sessionId}`);
+      updateState((draft) => {
+        const index = draft.sessions.findIndex((item) => item.id === session.id);
+        if (index >= 0) draft.sessions[index] = { ...draft.sessions[index], ...session };
+        else draft.sessions.unshift(session);
+      });
+      return session;
+    } catch (error) {
+      return mockApi.getSession(sessionId);
+    }
+  },
 
   async submitAnswer({ sessionId, questionIndex, answer }) {
     const session = loadState().sessions.find((item) => item.id === sessionId);
     if (!session) {
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }
+    if (session.retryMistakeIds?.length > 0) {
+      return mockApi.submitAnswer({ sessionId, questionIndex, answer });
+    }
 
     const question = session.questions[questionIndex];
-    const { result } = await request("/api/answers/grade", {
+    const { result, answerId, createdAt } = await request("/api/answers/grade", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        sessionId,
         question,
         answer,
         mode: session.mode,
@@ -266,7 +365,7 @@ export const api = {
     });
 
     const answerRecord = {
-      id: uid("ans"),
+      id: answerId || uid("ans"),
       sessionId,
       questionId: question.id,
       subjectId: question.subjectId || session.subjectId,
@@ -275,8 +374,16 @@ export const api = {
       userAnswer: answer,
       result,
       isRetry: session.retryMistakeIds?.length > 0,
-      createdAt: new Date().toISOString(),
+      createdAt: createdAt || new Date().toISOString(),
     };
+    await track("answer_submitted", {
+      sessionId,
+      subjectId: question.subjectId || session.subjectId,
+      questionId: question.id,
+      type: question.type,
+      isCorrect: result.isCorrect,
+      accuracy: result.accuracy ?? null,
+    });
 
     updateState((draft) => {
       const current = draft.sessions.find((item) => item.id === sessionId);
@@ -313,10 +420,28 @@ export const api = {
       current.completedAt = new Date().toISOString();
       current.summary = summary;
     });
+    await request(`/api/sessions/${sessionId}/finish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(summary),
+    });
+    await track("practice_finished", {
+      sessionId,
+      subjectId: session.subjectId,
+      ...summary,
+    });
 
     return summary;
   },
   async getMistakes(subjectId) {
+    try {
+      const query = subjectId ? `?subjectId=${encodeURIComponent(subjectId)}` : "";
+      const mistakes = await request(`/api/mistakes${query}`);
+      await track("mistakes_viewed", { subjectId: subjectId || "" });
+      if (mistakes.length) return mistakes;
+    } catch (error) {
+      console.warn("Mistakes endpoint failed, falling back to local state:", error);
+    }
     const state = loadState();
     const dashboard = await this.getDashboard();
     const subjectIds = new Set(dashboard.subjects.map((subject) => subject.id));

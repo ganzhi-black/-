@@ -35,19 +35,148 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: uploadLimitMb * 1024 * 1024 },
 });
-const store = process.env.DATABASE_URL ? await createDbStore(process.env.DATABASE_URL) : createMemoryStore();
+const useMemoryStore = process.env.USE_MEMORY_STORE === "1";
+const store = !useMemoryStore && process.env.DATABASE_URL ? await createDbStore(process.env.DATABASE_URL) : createMemoryStore();
 
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+function createCorsOptions() {
+  const configuredOrigins = String(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
-function normalizeVisitorId(value) {
-  return String(value || "anonymous-public").replace(/[^a-zA-Z0-9:_-]/g, "").slice(0, 80) || "anonymous-public";
+  if (configuredOrigins.length === 0 || configuredOrigins.includes("*")) {
+    return {
+      origin: true,
+      credentials: true,
+    };
+  }
+
+  const allowedOrigins = new Set(configuredOrigins);
+  return {
+    credentials: true,
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+      return callback(new Error(`CORS origin not allowed: ${origin}`));
+    },
+  };
 }
 
-app.use((req, res, next) => {
-  req.visitorId = normalizeVisitorId(req.get("X-Visitor-Id"));
+app.use(cors(createCorsOptions()));
+app.use(express.json({ limit: "2mb" }));
+
+const SESSION_COOKIE_NAME = "qimoshua_session";
+const SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_DAYS || 30);
+const PASSWORD_MIN_LENGTH = 8;
+
+function parseCookies(cookieHeader = "") {
+  return Object.fromEntries(
+    String(cookieHeader)
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        if (index < 0) return [part, ""];
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      }),
+  );
+}
+
+function hashSessionToken(token) {
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash = "") {
+  const [scheme, salt, hash] = storedHash.split(":");
+  if (scheme !== "scrypt" || !salt || !hash) return false;
+  const candidate = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(hash, "hex");
+  return expected.length === candidate.length && crypto.timingSafeEqual(candidate, expected);
+}
+
+function publicUser(user) {
+  return {
+    id: user.id || user.user_id,
+    email: user.email,
+    nickname: user.nickname,
+    createdAt: user.created_at,
+  };
+}
+
+function sessionCookieOptions() {
+  const maxAge = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
+  return {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge,
+    path: "/",
+  };
+}
+
+async function createLoginSession(req, res, user) {
+  const token = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
+  await store.createAuthSession({
+    userId: user.id,
+    tokenHash: hashSessionToken(token),
+    expiresAt,
+    userAgent: req.get("user-agent"),
+    ipAddress: req.ip,
+  });
+  res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
+}
+
+async function resolveAuth(req, res, next) {
+  try {
+    const token = parseCookies(req.get("cookie"))[SESSION_COOKIE_NAME];
+    if (token) {
+      const session = await store.getAuthSession(hashSessionToken(token));
+      if (session) {
+        req.user = publicUser(session);
+        req.visitorId = req.user.id;
+      }
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+function requireAuth(req, res, next) {
+  if (process.env.DISABLE_ADMIN_AUTH === "1" && String(req.originalUrl || "").startsWith("/api/admin/")) {
+    return next();
+  }
+
+  if (!req.user) {
+    return res.status(401).json({ error: "请先注册或登录后再使用。" });
+  }
   next();
-});
+}
+
+function requireAdmin(req, res, next) {
+  if (process.env.DISABLE_ADMIN_AUTH === "1") return next();
+
+  const configuredEmails = String(process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (configuredEmails.length === 0) {
+    return res.status(403).json({ error: "未配置管理员邮箱，数据看板暂不可访问。" });
+  }
+  if (configuredEmails.includes(String(req.user?.email || "").toLowerCase())) return next();
+
+  return res.status(403).json({ error: "你没有查看数据看板的权限。" });
+}
+
+app.use(resolveAuth);
 
 function createSessionPayload({ subjectId, mode, questions }) {
   return {
@@ -174,12 +303,75 @@ app.get("/api/health", async (req, res, next) => {
     res.json({
       ok: true,
       service: "qimoshua-rag-api",
-      mode: process.env.DATABASE_URL ? "database" : "memory",
+      mode: useMemoryStore || !process.env.DATABASE_URL ? "memory" : "database",
     });
   } catch (error) {
     next(error);
   }
 });
+
+app.post("/api/auth/register", async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const nickname = String(req.body?.nickname || "").trim();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "请输入有效邮箱。" });
+    }
+    if (password.length < PASSWORD_MIN_LENGTH) {
+      return res.status(400).json({ error: `密码至少需要 ${PASSWORD_MIN_LENGTH} 位。` });
+    }
+
+    const user = await store.createUser({
+      email,
+      passwordHash: hashPassword(password),
+      nickname: nickname.slice(0, 30) || email.split("@")[0],
+    });
+    await createLoginSession(req, res, user);
+    res.status(201).json({ user: publicUser(user) });
+  } catch (error) {
+    if (error?.code === "23505") {
+      return res.status(409).json({ error: "这个邮箱已经注册过了。" });
+    }
+    next(error);
+  }
+});
+
+app.post("/api/auth/login", async (req, res, next) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const user = await store.getUserByEmail(email);
+
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      return res.status(401).json({ error: "邮箱或密码不正确。" });
+    }
+
+    await createLoginSession(req, res, user);
+    res.json({ user: publicUser(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/logout", async (req, res, next) => {
+  try {
+    const token = parseCookies(req.get("cookie"))[SESSION_COOKIE_NAME];
+    if (token) await store.deleteAuthSession(hashSessionToken(token));
+    res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/auth/me", async (req, res) => {
+  if (!req.user) return res.status(401).json({ error: "请先登录。" });
+  res.json({ user: req.user });
+});
+
+app.use("/api", requireAuth);
 
 app.post("/api/subjects", async (req, res, next) => {
   try {
@@ -342,7 +534,22 @@ app.post("/api/sessions", async (req, res, next) => {
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
 
     const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
-    res.status(201).json(createSessionPayload({ subjectId, mode, questions: result.questions }));
+    const session = createSessionPayload({ subjectId, mode, questions: result.questions });
+    if (store.createPracticeSession) {
+      await store.createPracticeSession({ visitorId: req.visitorId, session });
+    }
+    res.status(201).json(session);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/sessions/:sessionId", async (req, res, next) => {
+  try {
+    if (!store.getPracticeSession) return res.status(404).json({ error: "Session not found." });
+    const session = await store.getPracticeSession({ visitorId: req.visitorId, sessionId: req.params.sessionId });
+    if (!session) return res.status(404).json({ error: "Session not found." });
+    res.json(session);
   } catch (error) {
     next(error);
   }
@@ -353,6 +560,7 @@ app.post("/api/answers/grade", async (req, res, next) => {
     const question = req.body?.question;
     const answer = String(req.body?.answer || "").trim();
     const mode = String(req.body?.mode || "relaxed");
+    const sessionId = String(req.body?.sessionId || "").trim();
 
     if (!question?.id || !question?.type) return res.status(400).json({ error: "question is required." });
     if (!answer) return res.status(400).json({ error: "answer is required." });
@@ -362,7 +570,90 @@ app.post("/api/answers/grade", async (req, res, next) => {
         ? gradeSingleAnswer({ question, answer })
         : await gradeSubjectiveAnswer({ question, answer, mode });
 
-    res.json({ result });
+    let savedAnswer = null;
+    if (sessionId && store.saveAnswer) {
+      savedAnswer = await store.saveAnswer({
+        visitorId: req.visitorId,
+        sessionId,
+        question,
+        answer,
+        result,
+      });
+    }
+
+    res.json({ result, answerId: savedAnswer?.id || null, createdAt: savedAnswer?.createdAt || null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/sessions/:sessionId/finish", async (req, res, next) => {
+  try {
+    const summary = {
+      total: Number(req.body?.total || 0),
+      answeredCount: Number(req.body?.answeredCount || 0),
+      skippedCount: Number(req.body?.skippedCount || 0),
+      correctCount: Number(req.body?.correctCount || 0),
+      rate: Number(req.body?.rate || 0),
+      mistakeCount: Number(req.body?.mistakeCount || 0),
+    };
+    if (store.finishPracticeSession) {
+      await store.finishPracticeSession({
+        visitorId: req.visitorId,
+        sessionId: req.params.sessionId,
+        summary,
+      });
+    }
+    res.json({ summary });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/mistakes", async (req, res, next) => {
+  try {
+    const subjectId = String(req.query?.subjectId || "").trim();
+    if (!store.listMistakes) return res.json([]);
+    res.json(await store.listMistakes({ visitorId: req.visitorId, subjectId }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/metrics", requireAdmin, async (req, res, next) => {
+  try {
+    if (!store.getAdminMetrics) return res.status(501).json({ error: "Metrics store is not available." });
+    res.json(await store.getAdminMetrics());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/admin/events", requireAdmin, async (req, res, next) => {
+  try {
+    const limit = Number(req.query?.limit || 50);
+    if (!store.listAdminEvents) return res.json([]);
+    res.json(await store.listAdminEvents({ limit }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/analytics/events", async (req, res, next) => {
+  try {
+    const eventName = String(req.body?.eventName || "").trim();
+    if (!eventName) return res.status(400).json({ error: "eventName is required." });
+    if (store.saveAnalyticsEvent) {
+      await store.saveAnalyticsEvent({
+        visitorId: req.visitorId,
+        eventName: eventName.slice(0, 80),
+        sessionId: String(req.body?.sessionId || "").slice(0, 120),
+        pagePath: String(req.body?.pagePath || "").slice(0, 300),
+        properties: req.body?.properties && typeof req.body.properties === "object" ? req.body.properties : {},
+        userAgent: req.get("user-agent"),
+      });
+    }
+    res.status(202).json({ ok: true });
   } catch (error) {
     next(error);
   }

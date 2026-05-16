@@ -2,7 +2,7 @@ import { AlertCircle, ArrowRight, Clock3, History, UploadCloud } from "lucide-re
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
-import { api } from "../services/api.js";
+import { api, track } from "../services/api.js";
 
 const acceptedTypes = [".pdf", ".doc", ".docx", ".txt", ".md"];
 const defaultQuestionTypes = ["single", "short", "essay"];
@@ -69,6 +69,11 @@ export default function UploadPage() {
       });
       navigate(`/quiz/${session.id}`);
     } catch (nextError) {
+      await track("upload_failed", {
+        fileType: file?.name?.split(".").pop()?.toLowerCase() || "",
+        fileSize: file?.size || 0,
+        reason: nextError.message,
+      });
       setError(nextError.message);
       setLoading(false);
     }

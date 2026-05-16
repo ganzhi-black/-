@@ -2,6 +2,7 @@ import pg from "pg";
 
 const DEFAULT_VISITOR_ID = "anonymous-public";
 const DEFAULT_CHUNK_INSERT_BATCH_SIZE = 20;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function toVectorSql(vector) {
   return `[${vector.join(",")}]`;
@@ -50,6 +51,11 @@ function normalizeVisitorId(visitorId) {
 }
 
 async function ensureVisitorUser(pool, visitorId) {
+  if (UUID_PATTERN.test(String(visitorId || ""))) {
+    const actualUser = await pool.query("select id from users where id = $1 limit 1", [visitorId]);
+    if (actualUser.rows[0]) return actualUser.rows[0].id;
+  }
+
   const nickname = `visitor:${normalizeVisitorId(visitorId)}`;
   const existing = await pool.query("select id from users where nickname = $1 limit 1", [nickname]);
   if (existing.rows[0]) {
@@ -61,10 +67,81 @@ async function ensureVisitorUser(pool, visitorId) {
 }
 
 async function ensureSchema(pool) {
+  await pool.query("alter table users add column if not exists email text");
+  await pool.query("alter table users add column if not exists password_hash text");
+  await pool.query("create unique index if not exists users_email_unique_idx on users(lower(email)) where email is not null");
+  await pool.query(`
+    create table if not exists auth_sessions (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references users(id) on delete cascade,
+      token_hash text not null unique,
+      expires_at timestamptz not null,
+      user_agent text,
+      ip_address text,
+      created_at timestamptz not null default now()
+    )
+  `);
+  await pool.query("create index if not exists auth_sessions_user_idx on auth_sessions(user_id)");
+  await pool.query("create index if not exists auth_sessions_expires_idx on auth_sessions(expires_at)");
   await pool.query("alter table documents add column if not exists content_hash text");
   await pool.query("alter table questions add column if not exists document_hash text");
   await pool.query("create index if not exists documents_content_hash_idx on documents(content_hash)");
   await pool.query("create index if not exists questions_document_hash_idx on questions(document_hash)");
+  await pool.query(`
+    create table if not exists practice_sessions (
+      id text primary key,
+      user_id uuid not null references users(id) on delete cascade,
+      subject_id uuid not null references subjects(id) on delete cascade,
+      mode text not null default 'relaxed',
+      question_types text[] not null default '{}',
+      question_ids uuid[] not null default '{}',
+      question_count integer not null default 0,
+      answered_count integer not null default 0,
+      skipped_count integer not null default 0,
+      correct_count integer not null default 0,
+      wrong_count integer not null default 0,
+      accuracy_rate integer not null default 0,
+      started_at timestamptz not null default now(),
+      completed_at timestamptz
+    )
+  `);
+  await pool.query("create index if not exists practice_sessions_user_idx on practice_sessions(user_id, started_at desc)");
+  await pool.query("alter table answers add column if not exists session_id text");
+  await pool.query("alter table answers add column if not exists subject_id uuid references subjects(id) on delete cascade");
+  await pool.query("alter table answers add column if not exists is_correct boolean");
+  await pool.query("alter table answers add column if not exists accuracy numeric");
+  await pool.query(`
+    do $$
+    begin
+      if not exists (select 1 from pg_constraint where conname = 'answers_session_fk') then
+        alter table answers add constraint answers_session_fk
+          foreign key (session_id) references practice_sessions(id) on delete cascade;
+      end if;
+    end $$;
+  `);
+  await pool.query(`
+    create table if not exists analytics_events (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid references users(id) on delete set null,
+      session_id text,
+      event_name text not null,
+      page_path text,
+      properties jsonb not null default '{}',
+      user_agent text,
+      created_at timestamptz not null default now()
+    )
+  `);
+  await pool.query("create index if not exists analytics_events_created_idx on analytics_events(created_at desc)");
+  await pool.query("create index if not exists analytics_events_name_idx on analytics_events(event_name, created_at desc)");
+  await pool.query(`
+    create table if not exists daily_metrics (
+      metric_date date not null,
+      metric_name text not null,
+      metric_value numeric not null default 0,
+      properties jsonb not null default '{}',
+      primary key (metric_date, metric_name, properties)
+    )
+  `);
 }
 
 export async function createDbStore(databaseUrl) {
@@ -80,6 +157,81 @@ export async function createDbStore(databaseUrl) {
   }
 
   return {
+    async createUser({ email, passwordHash, nickname }) {
+      const normalizedEmail = String(email || "").trim().toLowerCase();
+      const result = await pool.query(
+        `
+          insert into users (email, password_hash, nickname)
+          values ($1, $2, $3)
+          returning id, email, nickname, created_at
+        `,
+        [normalizedEmail, passwordHash, nickname || normalizedEmail.split("@")[0]],
+      );
+      return result.rows[0];
+    },
+
+    async getUserByEmail(email) {
+      const normalizedEmail = String(email || "").trim().toLowerCase();
+      const result = await pool.query(
+        `
+          select id, email, password_hash, nickname, created_at
+          from users
+          where lower(email) = $1
+          limit 1
+        `,
+        [normalizedEmail],
+      );
+      return result.rows[0] || null;
+    },
+
+    async getUserById(userId) {
+      const result = await pool.query(
+        `
+          select id, email, nickname, created_at
+          from users
+          where id = $1
+          limit 1
+        `,
+        [userId],
+      );
+      return result.rows[0] || null;
+    },
+
+    async createAuthSession({ userId, tokenHash, expiresAt, userAgent, ipAddress }) {
+      await pool.query(
+        `
+          insert into auth_sessions (user_id, token_hash, expires_at, user_agent, ip_address)
+          values ($1, $2, $3, $4, $5)
+        `,
+        [userId, tokenHash, expiresAt, userAgent || "", ipAddress || ""],
+      );
+    },
+
+    async getAuthSession(tokenHash) {
+      const result = await pool.query(
+        `
+          select
+            s.id,
+            s.user_id,
+            s.expires_at,
+            u.email,
+            u.nickname,
+            u.created_at
+          from auth_sessions s
+          join users u on u.id = s.user_id
+          where s.token_hash = $1
+            and s.expires_at > now()
+          limit 1
+        `,
+        [tokenHash],
+      );
+      return result.rows[0] || null;
+    },
+
+    async deleteAuthSession(tokenHash) {
+      await pool.query("delete from auth_sessions where token_hash = $1", [tokenHash]);
+    },
+
     async health() {
       await pool.query("select 1");
       return { ok: true };
@@ -421,6 +573,591 @@ export async function createDbStore(databaseUrl) {
         });
       }
       return saved;
+    },
+
+    async createPracticeSession({ visitorId, session }) {
+      const userId = await getUserId(visitorId);
+      await pool.query(
+        `
+          insert into practice_sessions (
+            id,
+            user_id,
+            subject_id,
+            mode,
+            question_types,
+            question_ids,
+            question_count
+          )
+          values ($1, $2, $3, $4, $5::text[], $6::uuid[], $7)
+        `,
+        [
+          session.id,
+          userId,
+          session.subjectId,
+          session.mode,
+          Array.from(new Set(session.questions.map((question) => question.type))),
+          session.questions.map((question) => question.id),
+          session.questions.length,
+        ],
+      );
+      return session;
+    },
+
+    async getPracticeSession({ visitorId, sessionId }) {
+      const userId = await getUserId(visitorId);
+      const sessionResult = await pool.query("select * from practice_sessions where user_id = $1 and id = $2 limit 1", [userId, sessionId]);
+      const session = sessionResult.rows[0];
+      if (!session) return null;
+
+      const questionsResult = await pool.query(
+        `
+          select
+            id,
+            subject_id,
+            type,
+            title,
+            options,
+            correct_answer,
+            explanation,
+            source_chunk_ids,
+            created_at
+          from questions
+          where user_id = $1
+            and id = any($2::uuid[])
+          order by array_position($2::uuid[], id)
+        `,
+        [userId, session.question_ids],
+      );
+      const questions = questionsResult.rows.map((row) => ({
+        id: row.id,
+        subjectId: row.subject_id,
+        type: row.type,
+        title: row.title,
+        options: row.options,
+        correctAnswer: row.correct_answer,
+        explanation: row.explanation,
+        keyPoints: [],
+        evidenceQuote: "",
+        sourceChunkIds: row.source_chunk_ids || [],
+        sourceText: "",
+        sourceLocation: "",
+      }));
+      const questionIndexById = new Map(questions.map((question, index) => [question.id, index]));
+
+      const answersResult = await pool.query(
+        `
+          select
+            id,
+            session_id,
+            question_id,
+            subject_id,
+            user_answer,
+            result,
+            created_at
+          from answers
+          where user_id = $1
+            and session_id = $2
+          order by created_at asc
+        `,
+        [userId, sessionId],
+      );
+      const answers = answersResult.rows.map((row) => {
+        const questionIndex = questionIndexById.get(row.question_id) ?? 0;
+        return {
+          id: row.id,
+          sessionId: row.session_id,
+          questionId: row.question_id,
+          subjectId: row.subject_id,
+          questionIndex,
+          question: questions[questionIndex],
+          userAnswer: row.user_answer,
+          result: row.result,
+          createdAt: row.created_at,
+        };
+      });
+
+      return {
+        id: session.id,
+        subjectId: session.subject_id,
+        mode: session.mode,
+        questions,
+        answers,
+        currentIndex: Math.min(answers.length, Math.max(0, questions.length - 1)),
+        retryMistakeIds: [],
+        createdAt: session.started_at,
+        completedAt: session.completed_at,
+        summary: session.completed_at
+          ? {
+              total: session.question_count,
+              answeredCount: session.answered_count,
+              skippedCount: session.skipped_count,
+              correctCount: session.correct_count,
+              rate: session.accuracy_rate,
+              mistakeCount: session.wrong_count,
+            }
+          : null,
+      };
+    },
+
+    async saveAnswer({ visitorId, sessionId, question, answer, result }) {
+      const userId = await getUserId(visitorId);
+      const saved = await pool.query(
+        `
+          insert into answers (
+            user_id,
+            session_id,
+            subject_id,
+            question_id,
+            user_answer,
+            is_correct,
+            accuracy,
+            result
+          )
+          values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+          returning id, created_at
+        `,
+        [
+          userId,
+          sessionId,
+          question.subjectId,
+          question.id,
+          answer,
+          Boolean(result.isCorrect),
+          Number(result.accuracy ?? (result.isCorrect ? 1 : 0)),
+          JSON.stringify(result),
+        ],
+      );
+
+      if (!result.isCorrect) {
+        await pool.query(
+          `
+            insert into mistakes (user_id, subject_id, question_id, last_answer_id, attempts)
+            values ($1, $2, $3, $4, 1)
+            on conflict (user_id, question_id)
+            do update set
+              last_answer_id = excluded.last_answer_id,
+              attempts = mistakes.attempts + 1,
+              updated_at = now()
+          `,
+          [userId, question.subjectId, question.id, saved.rows[0].id],
+        );
+      } else {
+        await pool.query("delete from mistakes where user_id = $1 and question_id = $2", [userId, question.id]);
+      }
+
+      return {
+        id: saved.rows[0].id,
+        createdAt: saved.rows[0].created_at,
+      };
+    },
+
+    async finishPracticeSession({ visitorId, sessionId, summary }) {
+      const userId = await getUserId(visitorId);
+      await pool.query(
+        `
+          update practice_sessions
+          set
+            answered_count = $3,
+            skipped_count = $4,
+            correct_count = $5,
+            wrong_count = $6,
+            accuracy_rate = $7,
+            completed_at = coalesce(completed_at, now())
+          where user_id = $1 and id = $2
+        `,
+        [
+          userId,
+          sessionId,
+          summary.answeredCount,
+          summary.skippedCount,
+          summary.correctCount,
+          summary.mistakeCount,
+          summary.rate,
+        ],
+      );
+    },
+
+    async listMistakes({ visitorId, subjectId }) {
+      const userId = await getUserId(visitorId);
+      const params = [userId];
+      const subjectFilter = subjectId ? "and m.subject_id = $2" : "";
+      if (subjectId) params.push(subjectId);
+      const result = await pool.query(
+        `
+          select
+            m.id,
+            m.subject_id,
+            m.attempts,
+            m.updated_at,
+            q.id as question_id,
+            q.type,
+            q.title,
+            q.options,
+            q.correct_answer,
+            q.explanation,
+            q.source_chunk_ids,
+            a.user_answer,
+            a.result,
+            a.accuracy,
+            a.created_at as answer_created_at
+          from mistakes m
+          join questions q on q.id = m.question_id
+          left join answers a on a.id = m.last_answer_id
+          where m.user_id = $1
+            ${subjectFilter}
+          order by m.updated_at desc
+        `,
+        params,
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        subjectId: row.subject_id,
+        question: {
+          id: row.question_id,
+          subjectId: row.subject_id,
+          type: row.type,
+          title: row.title,
+          options: row.options,
+          correctAnswer: row.correct_answer,
+          explanation: row.explanation,
+          sourceChunkIds: row.source_chunk_ids || [],
+        },
+        lastAnswer: row.user_answer || "",
+        lastResult: row.result || {},
+        lastAccuracy: Number(row.accuracy ?? row.result?.accuracy ?? 0),
+        attempts: Number(row.attempts || 1),
+        createdAt: row.answer_created_at || row.updated_at,
+        updatedAt: row.updated_at,
+      }));
+    },
+
+    async getAdminMetrics() {
+      const realUserFilter = `
+        email is not null
+        and email <> ''
+        and lower(email) !~ '^(codex-test-|metrics-test-).*@example\\.com$'
+      `;
+      const [dataTrustResult, totalsResult, todayResult, funnelResult, volumeResult, qualityResult, sourceResult, eventBreakdownResult, dailyActivityResult] = await Promise.all([
+        pool.query(`
+          select
+            count(*)::int as all_users,
+            count(distinct lower(email)) filter (where ${realUserFilter})::int as real_registered_users,
+            count(*) filter (where email is null or email = '' or nickname like 'visitor:%')::int as legacy_users,
+            count(*) filter (where lower(coalesce(email, '')) ~ '^(codex-test-|metrics-test-).*@example\\.com$')::int as test_users
+          from users
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select
+            (select count(*) from real_users) as users,
+            (select count(*) from subjects where user_id in (select id from real_users)) as subjects,
+            (select count(*) from documents where user_id in (select id from real_users)) as documents,
+            (select count(*) from questions where user_id in (select id from real_users)) as questions,
+            (select count(*) from practice_sessions where user_id in (select id from real_users)) as sessions,
+            (select count(*) from answers where user_id in (select id from real_users)) as answers,
+            (select count(*) from mistakes where user_id in (select id from real_users)) as mistakes
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select
+            (select count(*) from real_users ru join users u on u.id = ru.id where u.created_at >= current_date) as registered_users,
+            (select count(distinct user_id) from analytics_events where created_at >= current_date and user_id in (select id from real_users)) as active_users,
+            (select count(*) from documents where created_at >= current_date and user_id in (select id from real_users)) as uploads,
+            (select count(*) from practice_sessions where started_at >= current_date and user_id in (select id from real_users)) as practice_started,
+            (select count(*) from practice_sessions where completed_at >= current_date and user_id in (select id from real_users)) as practice_completed,
+            (select count(*) from answers where created_at >= current_date and user_id in (select id from real_users)) as answers,
+            (select count(*) from analytics_events where created_at >= current_date and user_id in (select id from real_users)) as events
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          ),
+          steps as (
+            select
+              (select count(*) from real_users) as registered_users,
+              (select count(distinct user_id) from documents where user_id in (select id from real_users)) as uploaded_users,
+              (select count(distinct user_id) from practice_sessions where user_id in (select id from real_users)) as practice_started_users,
+              (select count(distinct user_id) from practice_sessions where completed_at is not null and user_id in (select id from real_users)) as practice_completed_users,
+              (select count(distinct user_id) from answers where user_id in (select id from real_users)) as answered_users,
+              (select count(distinct user_id) from mistakes where user_id in (select id from real_users)) as mistake_users,
+              (select count(distinct user_id) from analytics_events where event_name = 'mistakes_viewed' and user_id in (select id from real_users)) as mistake_viewed_users,
+              (select count(distinct user_id) from analytics_events where event_name = 'mistake_retry_started' and user_id in (select id from real_users)) as mistake_retry_users
+          )
+          select * from steps
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select
+            (select count(*) from documents where user_id in (select id from real_users)) as uploads,
+            (select count(*) from questions where user_id in (select id from real_users)) as questions,
+            (select count(*) from practice_sessions where user_id in (select id from real_users)) as practice_started,
+            (select count(*) from practice_sessions where completed_at is not null and user_id in (select id from real_users)) as practice_completed,
+            (select count(*) from answers where user_id in (select id from real_users)) as answers,
+            (select count(*) from mistakes where user_id in (select id from real_users)) as mistakes,
+            (select count(*) from analytics_events where event_name = 'upload_clicked' and user_id in (select id from real_users)) as upload_clicks,
+            (select count(*) from analytics_events where event_name = 'upload_succeeded' and user_id in (select id from real_users)) as upload_success_events,
+            (select count(*) from analytics_events where event_name = 'upload_failed' and user_id in (select id from real_users)) as upload_failures,
+            (select count(*) from analytics_events where event_name = 'mistakes_viewed' and user_id in (select id from real_users)) as mistake_views,
+            (select count(*) from analytics_events where event_name = 'mistake_retry_started' and user_id in (select id from real_users)) as mistake_retries,
+            (select count(*) from analytics_events where event_name like '%mistakes_clicked' and user_id in (select id from real_users)) as mistake_entry_clicks
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select
+            (select count(*) from practice_sessions where user_id in (select id from real_users)) as total_sessions,
+            (select count(*) from practice_sessions where completed_at is not null and user_id in (select id from real_users)) as completed_sessions,
+            (select coalesce(round(100.0 * count(*) filter (where completed_at is not null) / nullif(count(*), 0)), 0)
+               from practice_sessions
+              where user_id in (select id from real_users)) as completion_rate,
+            (select coalesce(round(avg(accuracy_rate) filter (where completed_at is not null)), 0)
+               from practice_sessions
+              where user_id in (select id from real_users)) as average_accuracy,
+            (select coalesce(round(100.0 * count(*) filter (where is_correct = false) / nullif(count(*), 0)), 0)
+               from answers
+              where user_id in (select id from real_users)) as wrong_answer_rate
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select event_name, count(*) as count, count(distinct user_id) as users
+          from analytics_events
+          where user_id in (select id from real_users)
+            and event_name in (
+              'bottom_nav_mistakes_clicked',
+              'summary_mistakes_clicked',
+              'summary_mistakes_cta_viewed',
+              'home_mistakes_clicked',
+              'subject_mistakes_clicked',
+              'mistakes_viewed',
+              'mistake_retry_started'
+            )
+          group by event_name
+          order by count desc, event_name asc
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select event_name, count(*) as count
+          from analytics_events
+          where created_at >= now() - interval '7 days'
+            and user_id in (select id from real_users)
+          group by event_name
+          order by count desc, event_name asc
+          limit 12
+        `),
+        pool.query(`
+          with real_users as (
+            select id from users where ${realUserFilter}
+          )
+          select
+            to_char(days.day, 'MM-DD') as date,
+            count(distinct e.user_id) filter (where e.user_id is not null) as active_users,
+            count(e.id) as events,
+            count(a.id) as answers
+          from generate_series(current_date - interval '6 days', current_date, interval '1 day') days(day)
+          left join analytics_events e
+            on e.created_at >= days.day
+           and e.created_at < days.day + interval '1 day'
+           and e.user_id in (select id from real_users)
+          left join answers a
+            on a.created_at >= days.day
+           and a.created_at < days.day + interval '1 day'
+           and a.user_id in (select id from real_users)
+          group by days.day
+          order by days.day asc
+        `),
+      ]);
+
+      const dataTrust = dataTrustResult.rows[0];
+      const totals = totalsResult.rows[0];
+      const today = todayResult.rows[0];
+      const funnel = funnelResult.rows[0];
+      const volume = volumeResult.rows[0];
+      const quality = qualityResult.rows[0];
+      const number = (value) => Number(value || 0);
+      const rate = (part, whole) => (number(whole) ? Math.round((number(part) / number(whole)) * 100) : 0);
+      const funnelSteps = [
+        { name: "注册用户", value: number(funnel.registered_users) },
+        { name: "上传用户", value: number(funnel.uploaded_users) },
+        { name: "开练用户", value: number(funnel.practice_started_users) },
+        { name: "完成用户", value: number(funnel.practice_completed_users) },
+        { name: "答题用户", value: number(funnel.answered_users) },
+      ];
+
+      return {
+        generatedAt: new Date().toISOString(),
+        dataTrust: {
+          allUsers: number(dataTrust.all_users),
+          realRegisteredUsers: number(dataTrust.real_registered_users),
+          legacyUsersExcluded: number(dataTrust.legacy_users),
+          testUsersExcluded: number(dataTrust.test_users),
+        },
+        totals: {
+          users: number(totals.users),
+          subjects: number(totals.subjects),
+          documents: number(totals.documents),
+          questions: number(totals.questions),
+          sessions: number(totals.sessions),
+          answers: number(totals.answers),
+          mistakes: number(totals.mistakes),
+        },
+        today: {
+          registeredUsers: number(today.registered_users),
+          activeUsers: number(today.active_users),
+          uploads: number(today.uploads),
+          practiceStarted: number(today.practice_started),
+          practiceCompleted: number(today.practice_completed),
+          answers: number(today.answers),
+          events: number(today.events),
+        },
+        practice: {
+          totalSessions: number(quality.total_sessions),
+          completedSessions: number(quality.completed_sessions),
+          completionRate: number(quality.completion_rate),
+          averageAccuracy: number(quality.average_accuracy),
+          wrongAnswerRate: number(quality.wrong_answer_rate),
+        },
+        userFunnel: funnelSteps.map((step, index) => ({
+          ...step,
+          conversionRate: index === 0 ? 100 : rate(step.value, funnelSteps[index - 1].value),
+        })),
+        behaviorVolume: {
+          uploads: number(volume.uploads),
+          questions: number(volume.questions),
+          practiceStarted: number(volume.practice_started),
+          practiceCompleted: number(volume.practice_completed),
+          answers: number(volume.answers),
+          mistakes: number(volume.mistakes),
+          uploadClicks: number(volume.upload_clicks),
+          uploadSuccessEvents: number(volume.upload_success_events),
+          uploadFailures: number(volume.upload_failures),
+          mistakeViews: number(volume.mistake_views),
+          mistakeRetries: number(volume.mistake_retries),
+          mistakeEntryClicks: number(volume.mistake_entry_clicks),
+        },
+        scenarioMetricGroups: [
+          {
+            id: "upload",
+            title: "上传链路",
+            primaryMetric: "用户数、次数、成功与失败",
+            checks: [
+              { label: "注册到上传转化率", value: `${rate(funnel.uploaded_users, funnel.registered_users)}%` },
+              { label: "上传按钮点击", value: number(volume.upload_clicks) },
+              { label: "上传成功事件", value: number(volume.upload_success_events) },
+              { label: "上传失败事件", value: number(volume.upload_failures) },
+            ],
+          },
+          {
+            id: "practice",
+            title: "练习链路",
+            primaryMetric: "开练用户、生成题量与练习次数",
+            checks: [
+              { label: "上传到开练转化率", value: `${rate(funnel.practice_started_users, funnel.uploaded_users)}%` },
+              { label: "生成题目数", value: number(volume.questions) },
+              { label: "开始练习次数", value: number(volume.practice_started) },
+              { label: "完成练习次数", value: number(volume.practice_completed) },
+            ],
+          },
+          {
+            id: "completion",
+            title: "练习完成",
+            primaryMetric: "完成率、答题量与学习质量",
+            checks: [
+              { label: "练习完成率", value: `${number(quality.completion_rate)}%` },
+              { label: "提交答案数", value: number(volume.answers) },
+              { label: "平均正确率", value: `${number(quality.average_accuracy)}%` },
+              { label: "错答率", value: `${number(quality.wrong_answer_rate)}%` },
+            ],
+          },
+          {
+            id: "mistakes",
+            title: "错题链路",
+            primaryMetric: "错题产生、访问与复练",
+            checks: [
+              { label: "产生错题用户", value: number(funnel.mistake_users) },
+              { label: "访问错题用户", value: number(funnel.mistake_viewed_users) },
+              { label: "错题访问次数", value: number(volume.mistake_views) },
+              { label: "错题复练次数", value: number(volume.mistake_retries) },
+            ],
+          },
+        ],
+        mistakeEntrySources: sourceResult.rows.map((row) => ({
+          name: row.event_name,
+          count: number(row.count),
+          users: number(row.users),
+        })),
+        eventBreakdown: eventBreakdownResult.rows.map((row) => ({
+          name: row.event_name,
+          count: number(row.count),
+        })),
+        dailyActivity: dailyActivityResult.rows.map((row) => ({
+          date: row.date,
+          activeUsers: number(row.active_users),
+          events: number(row.events),
+          answers: number(row.answers),
+        })),
+      };
+    },
+
+    async listAdminEvents({ limit = 50 } = {}) {
+      const realUserFilter = `
+        email is not null
+        and email <> ''
+        and lower(email) !~ '^(codex-test-|metrics-test-).*@example\\.com$'
+      `;
+      const result = await pool.query(
+        `
+          select
+            e.id,
+            e.event_name,
+            e.page_path,
+            e.session_id,
+            e.properties,
+            e.created_at,
+            u.email,
+            u.nickname
+          from analytics_events e
+          join users u on u.id = e.user_id
+          where ${realUserFilter}
+          order by e.created_at desc
+          limit $1
+        `,
+        [Math.min(100, Math.max(1, Number(limit) || 50))],
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        eventName: row.event_name,
+        pagePath: row.page_path || "",
+        sessionId: row.session_id || "",
+        properties: row.properties || {},
+        createdAt: row.created_at,
+        user: {
+          email: row.email || "",
+          nickname: row.nickname || "",
+        },
+      }));
+    },
+
+    async saveAnalyticsEvent({ visitorId, eventName, sessionId, pagePath, properties, userAgent }) {
+      const userId = visitorId ? await getUserId(visitorId) : null;
+      await pool.query(
+        `
+          insert into analytics_events (user_id, session_id, event_name, page_path, properties, user_agent)
+          values ($1, $2, $3, $4, $5::jsonb, $6)
+        `,
+        [userId, sessionId || null, eventName, pagePath || "", JSON.stringify(properties || {}), userAgent || ""],
+      );
     },
   };
 }

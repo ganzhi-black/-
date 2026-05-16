@@ -9,12 +9,69 @@ function normalizeVisitorId(visitorId) {
 }
 
 export function createMemoryStore() {
+  const users = [];
+  const authSessions = [];
   const subjects = [];
   const documents = [];
   const chunks = [];
   const savedQuestions = [];
+  const practiceSessions = [];
+  const answers = [];
+  const mistakes = [];
+  const analyticsEvents = [];
 
   return {
+    createUser({ email, passwordHash, nickname }) {
+      const normalizedEmail = String(email || "").trim().toLowerCase();
+      if (users.some((user) => user.email === normalizedEmail)) {
+        const error = new Error("Email already exists.");
+        error.code = "23505";
+        throw error;
+      }
+      const user = {
+        id: uid("usr"),
+        email: normalizedEmail,
+        password_hash: passwordHash,
+        nickname: nickname || normalizedEmail.split("@")[0],
+        created_at: new Date().toISOString(),
+      };
+      users.push(user);
+      return user;
+    },
+
+    getUserByEmail(email) {
+      const normalizedEmail = String(email || "").trim().toLowerCase();
+      return users.find((user) => user.email === normalizedEmail) || null;
+    },
+
+    getUserById(userId) {
+      const user = users.find((item) => item.id === userId);
+      return user ? { id: user.id, email: user.email, nickname: user.nickname, created_at: user.created_at } : null;
+    },
+
+    createAuthSession({ userId, tokenHash, expiresAt, userAgent, ipAddress }) {
+      authSessions.push({ id: uid("auth"), user_id: userId, token_hash: tokenHash, expires_at: expiresAt, user_agent: userAgent, ip_address: ipAddress });
+    },
+
+    getAuthSession(tokenHash) {
+      const session = authSessions.find((item) => item.token_hash === tokenHash && new Date(item.expires_at).getTime() > Date.now());
+      if (!session) return null;
+      const user = users.find((item) => item.id === session.user_id);
+      if (!user) return null;
+      return {
+        id: session.id,
+        user_id: user.id,
+        email: user.email,
+        nickname: user.nickname,
+        created_at: user.created_at,
+      };
+    },
+
+    deleteAuthSession(tokenHash) {
+      const index = authSessions.findIndex((item) => item.token_hash === tokenHash);
+      if (index >= 0) authSessions.splice(index, 1);
+    },
+
     createSubject({ visitorId, name }) {
       const ownerId = normalizeVisitorId(visitorId);
       const subject = {
@@ -150,6 +207,262 @@ export function createMemoryStore() {
         .filter((question) => question.visitorId === ownerId && question.subjectId === subjectId && types.includes(question.type))
         .slice(-limit)
         .reverse();
+    },
+
+    createPracticeSession({ visitorId, session }) {
+      practiceSessions.push({
+        ...session,
+        visitorId: normalizeVisitorId(visitorId),
+        questionIds: session.questions.map((question) => question.id),
+        completedAt: null,
+        summary: null,
+      });
+      return session;
+    },
+
+    getPracticeSession({ visitorId, sessionId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const session = practiceSessions.find((item) => item.visitorId === ownerId && item.id === sessionId);
+      if (!session) return null;
+      const sessionAnswers = answers.filter((answer) => answer.visitorId === ownerId && answer.sessionId === sessionId);
+      return {
+        ...session,
+        answers: sessionAnswers,
+        currentIndex: Math.min(sessionAnswers.length, Math.max(0, session.questions.length - 1)),
+      };
+    },
+
+    saveAnswer({ visitorId, sessionId, question, answer, result }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const record = {
+        id: uid("ans"),
+        visitorId: ownerId,
+        sessionId,
+        questionId: question.id,
+        subjectId: question.subjectId,
+        questionIndex: 0,
+        question,
+        userAnswer: answer,
+        result,
+        createdAt: new Date().toISOString(),
+      };
+      answers.push(record);
+
+      const index = mistakes.findIndex((item) => item.visitorId === ownerId && item.questionId === question.id);
+      if (!result.isCorrect) {
+        if (index >= 0) {
+          mistakes[index] = { ...mistakes[index], lastAnswerId: record.id, attempts: mistakes[index].attempts + 1, updatedAt: new Date().toISOString() };
+        } else {
+          mistakes.push({ id: uid("m"), visitorId: ownerId, subjectId: question.subjectId, questionId: question.id, lastAnswerId: record.id, attempts: 1 });
+        }
+      } else if (index >= 0) {
+        mistakes.splice(index, 1);
+      }
+
+      return { id: record.id, createdAt: record.createdAt };
+    },
+
+    finishPracticeSession({ visitorId, sessionId, summary }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const session = practiceSessions.find((item) => item.visitorId === ownerId && item.id === sessionId);
+      if (session) {
+        session.completedAt = new Date().toISOString();
+        session.summary = summary;
+      }
+    },
+
+    listMistakes({ visitorId, subjectId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      return mistakes
+        .filter((mistake) => mistake.visitorId === ownerId && (!subjectId || mistake.subjectId === subjectId))
+        .map((mistake) => {
+          const answer = answers.find((item) => item.id === mistake.lastAnswerId);
+          const question = savedQuestions.find((item) => item.id === mistake.questionId) || answer?.question || {};
+          return {
+            id: mistake.id,
+            subjectId: mistake.subjectId,
+            question,
+            lastAnswer: answer?.userAnswer || "",
+            lastResult: answer?.result || {},
+            lastAccuracy: answer?.result?.accuracy ?? 0,
+            attempts: mistake.attempts,
+            createdAt: answer?.createdAt || mistake.updatedAt,
+            updatedAt: mistake.updatedAt,
+          };
+        });
+    },
+
+    getAdminMetrics() {
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const todayTime = startOfToday.getTime();
+      const isToday = (value) => new Date(value).getTime() >= todayTime;
+      const recentEvents = analyticsEvents.filter((event) => new Date(event.createdAt).getTime() >= sevenDaysAgo);
+      const completedSessions = practiceSessions.filter((session) => session.completedAt);
+      const averageAccuracy = completedSessions.length
+        ? Math.round(completedSessions.reduce((sum, session) => sum + Number(session.summary?.rate || 0), 0) / completedSessions.length)
+        : 0;
+      const eventCounts = recentEvents.reduce((counts, event) => {
+        counts.set(event.eventName, (counts.get(event.eventName) || 0) + 1);
+        return counts;
+      }, new Map());
+      const activeUsersToday = new Set(analyticsEvents.filter((event) => isToday(event.createdAt) && event.visitorId).map((event) => event.visitorId));
+
+      return {
+        generatedAt: new Date().toISOString(),
+        dataTrust: {
+          allUsers: users.length,
+          realRegisteredUsers: users.filter((user) => user.email && !/^(codex-test-|metrics-test-).*@example\.com$/i.test(user.email)).length,
+          legacyUsersExcluded: users.filter((user) => !user.email || user.nickname?.startsWith("visitor:")).length,
+          testUsersExcluded: users.filter((user) => /^(codex-test-|metrics-test-).*@example\.com$/i.test(user.email || "")).length,
+        },
+        totals: {
+          users: users.length,
+          subjects: subjects.length,
+          documents: documents.length,
+          questions: savedQuestions.length,
+          sessions: practiceSessions.length,
+          answers: answers.length,
+          mistakes: mistakes.length,
+        },
+        today: {
+          registeredUsers: users.filter((user) => isToday(user.created_at)).length,
+          activeUsers: activeUsersToday.size,
+          uploads: documents.filter((document) => isToday(document.createdAt)).length,
+          practiceStarted: practiceSessions.filter((session) => isToday(session.createdAt)).length,
+          practiceCompleted: practiceSessions.filter((session) => session.completedAt && isToday(session.completedAt)).length,
+          answers: answers.filter((answer) => isToday(answer.createdAt)).length,
+          events: analyticsEvents.filter((event) => isToday(event.createdAt)).length,
+        },
+        practice: {
+          totalSessions: practiceSessions.length,
+          completedSessions: completedSessions.length,
+          completionRate: practiceSessions.length ? Math.round((completedSessions.length / practiceSessions.length) * 100) : 0,
+          averageAccuracy,
+        },
+        userFunnel: [
+          { name: "注册用户", value: users.length, conversionRate: 100 },
+          { name: "上传用户", value: new Set(documents.map((item) => item.visitorId)).size, conversionRate: users.length ? Math.round((new Set(documents.map((item) => item.visitorId)).size / users.length) * 100) : 0 },
+          { name: "开练用户", value: new Set(practiceSessions.map((item) => item.visitorId)).size, conversionRate: documents.length ? Math.round((new Set(practiceSessions.map((item) => item.visitorId)).size / Math.max(1, new Set(documents.map((item) => item.visitorId)).size)) * 100) : 0 },
+          { name: "完成用户", value: new Set(completedSessions.map((item) => item.visitorId)).size, conversionRate: practiceSessions.length ? Math.round((new Set(completedSessions.map((item) => item.visitorId)).size / Math.max(1, new Set(practiceSessions.map((item) => item.visitorId)).size)) * 100) : 0 },
+          { name: "答题用户", value: new Set(answers.map((item) => item.visitorId)).size, conversionRate: completedSessions.length ? Math.round((new Set(answers.map((item) => item.visitorId)).size / Math.max(1, new Set(completedSessions.map((item) => item.visitorId)).size)) * 100) : 0 },
+        ],
+        behaviorVolume: {
+          uploads: documents.length,
+          questions: savedQuestions.length,
+          practiceStarted: practiceSessions.length,
+          practiceCompleted: completedSessions.length,
+          answers: answers.length,
+          mistakes: mistakes.length,
+          uploadClicks: analyticsEvents.filter((event) => event.eventName === "upload_clicked").length,
+          uploadSuccessEvents: analyticsEvents.filter((event) => event.eventName === "upload_succeeded").length,
+          uploadFailures: analyticsEvents.filter((event) => event.eventName === "upload_failed").length,
+          mistakeViews: analyticsEvents.filter((event) => event.eventName === "mistakes_viewed").length,
+          mistakeRetries: analyticsEvents.filter((event) => event.eventName === "mistake_retry_started").length,
+          mistakeEntryClicks: analyticsEvents.filter((event) => event.eventName?.includes("mistakes_clicked")).length,
+        },
+        scenarioMetricGroups: [
+          {
+            id: "upload",
+            title: "上传链路",
+            primaryMetric: "用户数、次数、成功与失败",
+            checks: [
+              { label: "上传按钮点击", value: analyticsEvents.filter((event) => event.eventName === "upload_clicked").length },
+              { label: "上传成功事件", value: analyticsEvents.filter((event) => event.eventName === "upload_succeeded").length },
+              { label: "上传失败事件", value: analyticsEvents.filter((event) => event.eventName === "upload_failed").length },
+            ],
+          },
+          {
+            id: "practice",
+            title: "练习链路",
+            primaryMetric: "开练用户、生成题量与练习次数",
+            checks: [
+              { label: "生成题目数", value: savedQuestions.length },
+              { label: "开始练习次数", value: practiceSessions.length },
+              { label: "完成练习次数", value: completedSessions.length },
+            ],
+          },
+          {
+            id: "completion",
+            title: "练习完成",
+            primaryMetric: "完成率、答题量与学习质量",
+            checks: [
+              { label: "练习完成率", value: `${practiceSessions.length ? Math.round((completedSessions.length / practiceSessions.length) * 100) : 0}%` },
+              { label: "提交答案数", value: answers.length },
+              { label: "平均正确率", value: `${averageAccuracy}%` },
+            ],
+          },
+          {
+            id: "mistakes",
+            title: "错题链路",
+            primaryMetric: "错题产生、访问与复练",
+            checks: [
+              { label: "产生错题用户", value: new Set(mistakes.map((item) => item.visitorId)).size },
+              { label: "错题访问次数", value: analyticsEvents.filter((event) => event.eventName === "mistakes_viewed").length },
+              { label: "错题复练次数", value: analyticsEvents.filter((event) => event.eventName === "mistake_retry_started").length },
+            ],
+          },
+        ],
+        mistakeEntrySources: [],
+        funnel: [
+          { name: "注册用户", value: users.length },
+          { name: "上传资料", value: documents.length },
+          { name: "开始练习", value: practiceSessions.length },
+          { name: "完成练习", value: completedSessions.length },
+          { name: "提交答案", value: answers.length },
+        ],
+        eventBreakdown: Array.from(eventCounts.entries())
+          .map(([name, count]) => ({ name, count }))
+          .sort((left, right) => right.count - left.count)
+          .slice(0, 12),
+        dailyActivity: Array.from({ length: 7 }, (_, index) => {
+          const day = new Date(Date.now() - (6 - index) * 24 * 60 * 60 * 1000);
+          const label = `${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+          return {
+            date: label,
+            activeUsers: new Set(
+              analyticsEvents
+                .filter((event) => new Date(event.createdAt).toDateString() === day.toDateString() && event.visitorId)
+                .map((event) => event.visitorId),
+            ).size,
+            events: analyticsEvents.filter((event) => new Date(event.createdAt).toDateString() === day.toDateString()).length,
+            answers: answers.filter((answer) => new Date(answer.createdAt).toDateString() === day.toDateString()).length,
+          };
+        }),
+      };
+    },
+
+    listAdminEvents({ limit = 50 } = {}) {
+      return analyticsEvents
+        .slice()
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+        .slice(0, Math.min(100, Math.max(1, Number(limit) || 50)))
+        .map((event) => ({
+          id: event.id,
+          eventName: event.eventName,
+          pagePath: event.pagePath || "",
+          sessionId: event.sessionId || "",
+          properties: event.properties || {},
+          createdAt: event.createdAt,
+          user: {
+            email: "",
+            nickname: event.visitorId || "",
+          },
+        }));
+    },
+
+    saveAnalyticsEvent({ visitorId, eventName, sessionId, pagePath, properties, userAgent }) {
+      analyticsEvents.push({
+        id: uid("evt"),
+        visitorId: visitorId ? normalizeVisitorId(visitorId) : null,
+        eventName,
+        sessionId,
+        pagePath,
+        properties: properties || {},
+        userAgent,
+        createdAt: new Date().toISOString(),
+      });
     },
   };
 }

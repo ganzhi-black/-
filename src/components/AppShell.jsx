@@ -47,7 +47,7 @@ export default function AppShell({ children, user, onLogout }) {
               <Plus size={20} />
             </NavLink>
           )}
-          {user && (
+          {user?.isAdmin && (
             <NavLink to="/admin/metrics" className="icon-button" aria-label="数据看板">
               <BarChart3 size={19} />
             </NavLink>

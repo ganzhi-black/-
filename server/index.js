@@ -100,12 +100,26 @@ function verifyPassword(password, storedHash = "") {
   return expected.length === candidate.length && crypto.timingSafeEqual(candidate, expected);
 }
 
+function configuredAdminEmails() {
+  return String(process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isAdminEmail(email) {
+  const configuredEmails = configuredAdminEmails();
+  return configuredEmails.length > 0 && configuredEmails.includes(String(email || "").trim().toLowerCase());
+}
+
 function publicUser(user) {
+  const email = user.email || "";
   return {
     id: user.id || user.user_id,
-    email: user.email,
+    email,
     nickname: user.nickname,
     createdAt: user.created_at,
+    isAdmin: isAdminEmail(email),
   };
 }
 
@@ -164,15 +178,12 @@ function requireAuth(req, res, next) {
 function requireAdmin(req, res, next) {
   if (process.env.DISABLE_ADMIN_AUTH === "1") return next();
 
-  const configuredEmails = String(process.env.ADMIN_EMAILS || "")
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
+  const configuredEmails = configuredAdminEmails();
 
   if (configuredEmails.length === 0) {
     return res.status(403).json({ error: "未配置管理员邮箱，数据看板暂不可访问。" });
   }
-  if (configuredEmails.includes(String(req.user?.email || "").toLowerCase())) return next();
+  if (isAdminEmail(req.user?.email)) return next();
 
   return res.status(403).json({ error: "你没有查看数据看板的权限。" });
 }

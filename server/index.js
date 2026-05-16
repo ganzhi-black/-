@@ -111,10 +111,11 @@ function publicUser(user) {
 
 function sessionCookieOptions() {
   const maxAge = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
+  const sameSite = String(process.env.AUTH_COOKIE_SAMESITE || "lax").toLowerCase();
   return {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite,
+    secure: sameSite === "none" || process.env.NODE_ENV === "production",
     maxAge,
     path: "/",
   };

@@ -3,7 +3,10 @@ import { loadState, updateState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
-export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? "" : "http://localhost:8787");
+const DEFAULT_PRODUCTION_API_BASE_URL = "https://api-production-5b928.up.railway.app";
+const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
+
+export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE_URL : "http://localhost:8787");
 const configuredRealtimeAsrUrl = import.meta.env.VITE_REALTIME_ASR_URL?.trim();
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
 
@@ -42,9 +45,9 @@ async function request(path, options = {}) {
     });
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("请求超时了，请稍后重试。");
+      throw new Error("批改响应超时，请稍后重试。");
     }
-    throw new Error("网络连接失败，请检查网络后重试。");
+    throw new Error("无法连接后端服务，请检查部署环境变量或稍后重试。");
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -252,8 +255,9 @@ export const api = {
         totalMistakes: mistakes.length,
       };
     } catch (error) {
-      console.warn("Using mock dashboard because backend is unavailable:", error);
-      return mockApi.getDashboard();
+      console.warn("Dashboard endpoint failed:", error);
+      if (MOCK_FALLBACK_ENABLED) return mockApi.getDashboard();
+      throw error;
     }
   },
 
@@ -297,6 +301,7 @@ export const api = {
       } catch (listError) {
         console.warn("Subject list fallback failed:", listError);
       }
+      if (!MOCK_FALLBACK_ENABLED) throw error;
       return mockApi.getSubject(subjectId);
     }
   },
@@ -366,6 +371,8 @@ export const api = {
       });
       return session;
     } catch (error) {
+      console.warn("Session endpoint failed:", error);
+      if (!MOCK_FALLBACK_ENABLED) throw error;
       return mockApi.getSession(sessionId);
     }
   },
@@ -373,6 +380,9 @@ export const api = {
   async submitAnswer({ sessionId, questionIndex, answer, sessionSnapshot = null }) {
     const rawSession = sessionSnapshot || loadState().sessions.find((item) => item.id === sessionId);
     if (!rawSession) {
+      if (!MOCK_FALLBACK_ENABLED) {
+        throw new Error("练习数据没有加载完成，请返回题目页重新进入。");
+      }
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }
     const session = normalizeSession(rawSession);
@@ -381,7 +391,7 @@ export const api = {
     }
 
     const question = session.questions[questionIndex];
-    if (!question) throw new Error("当前题目不存在，请返回重新开始练习。");
+    if (!question) throw new Error("没有找到当前题目，请返回题目页重新进入。");
     const { result, answerId, createdAt } = await request("/api/answers/grade", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

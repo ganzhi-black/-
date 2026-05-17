@@ -77,7 +77,7 @@ function sourceExcerpt(question, result) {
       question?.correctAnswer,
       question?.explanation,
       ...(question?.options || []).map((item) => item.text),
-      ...(question?.keyPoints || []),
+      ...(Array.isArray(question?.keyPoints) ? question.keyPoints : []),
     ].join(" "),
   );
 
@@ -133,6 +133,8 @@ export default function ResultPage() {
   if (!session || !record || !result) return <div className="skeleton-page" />;
 
   const subjective = record.question.type !== "single";
+  const coveredPoints = Array.isArray(result.coveredPoints) ? result.coveredPoints : [];
+  const missedPoints = Array.isArray(result.missedPoints) ? result.missedPoints : [];
 
   return (
     <div className="stack">
@@ -156,8 +158,8 @@ export default function ResultPage() {
               <CheckCircle2 size={18} />
               已覆盖要点
             </h3>
-            {result.coveredPoints.length ? (
-              result.coveredPoints.map((point) => (
+            {coveredPoints.length ? (
+              coveredPoints.map((point) => (
                 <p className="point good" key={point}>
                   {normalizeText(point)}
                 </p>
@@ -171,8 +173,8 @@ export default function ResultPage() {
               <XCircle size={18} />
               遗漏要点
             </h3>
-            {result.missedPoints.length ? (
-              result.missedPoints.map((point) => (
+            {missedPoints.length ? (
+              missedPoints.map((point) => (
                 <p className="point bad" key={point}>
                   {normalizeText(point)}
                 </p>

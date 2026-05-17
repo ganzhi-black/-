@@ -8,10 +8,10 @@ import { api } from "../services/api.js";
 import { updateState } from "../services/storage.js";
 
 function questionTypeLabel(type) {
-  if (type === "single") return "Single choice";
-  if (type === "term") return "Term";
-  if (type === "short") return "Short answer";
-  return "Essay";
+  if (type === "single") return "单选题";
+  if (type === "term") return "名词解释";
+  if (type === "short") return "简答题";
+  return "论述题";
 }
 
 function safeIndex(value) {
@@ -28,7 +28,18 @@ export default function QuizPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api.getSession(sessionId).then(setSession);
+    let alive = true;
+    api
+      .getSession(sessionId)
+      .then((nextSession) => {
+        if (alive) setSession(nextSession);
+      })
+      .catch((sessionError) => {
+        if (alive) setError(sessionError.message || "练习数据加载失败，请返回后重新进入。");
+      });
+    return () => {
+      alive = false;
+    };
   }, [sessionId]);
 
   const questions = Array.isArray(session?.questions) ? session.questions : [];
@@ -56,8 +67,7 @@ export default function QuizPage() {
       await api.submitAnswer({ sessionId, questionIndex: currentIndex, answer, sessionSnapshot: session });
       navigate(`/result/${sessionId}/${currentIndex}`);
     } catch (submitError) {
-      const message = submitError.message || "";
-      setError(message.includes("Cannot read") ? "Grading data is out of sync. Please refresh and retry." : message || "Grading failed. Please retry.");
+      setError(submitError.message || "批改失败了，请稍后重试。");
       setLoading(false);
     }
   }
@@ -90,7 +100,9 @@ export default function QuizPage() {
     setSkipLoading(false);
   }
 
-  if (!session || !question) return <div className="skeleton-page" />;
+  if (!session || !question) {
+    return error ? <div className="notice error">{error}</div> : <div className="skeleton-page" />;
+  }
 
   return (
     <div className="stack quiz-page">
@@ -100,7 +112,7 @@ export default function QuizPage() {
         </Link>
         <div>
           <p>
-            Question {currentIndex + 1} / {questions.length}
+            第 {currentIndex + 1} 题 / 共 {questions.length} 题
           </p>
           <ProgressDots total={questions.length} current={currentIndex} />
         </div>
@@ -127,12 +139,12 @@ export default function QuizPage() {
 
       {error && <div className="notice error">{error}</div>}
 
-      <LoadingButton className="primary-button full" loading={loading} loadingText="Grading..." onClick={submit} disabled={!answer || skipLoading}>
-        Submit
+      <LoadingButton className="primary-button full" loading={loading} loadingText="批改中，马上给出结果" onClick={submit} disabled={!answer || skipLoading}>
+        提交批改
         <Send size={18} />
       </LoadingButton>
       <LoadingButton className="secondary-button full" loading={skipLoading} onClick={skip} disabled={loading}>
-        Skip
+        跳过此题
         <SkipForward size={18} />
       </LoadingButton>
     </div>

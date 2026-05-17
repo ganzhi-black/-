@@ -21,6 +21,7 @@ export default function QuizPage() {
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
   const [skipLoading, setSkipLoading] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     api.getSession(sessionId).then(setSession);
@@ -39,8 +40,14 @@ export default function QuizPage() {
   async function submit() {
     if (!answer) return;
     setLoading(true);
-    await api.submitAnswer({ sessionId, questionIndex: session.currentIndex, answer });
-    navigate(`/result/${sessionId}/${session.currentIndex}`);
+    setError("");
+    try {
+      await api.submitAnswer({ sessionId, questionIndex: session.currentIndex, answer });
+      navigate(`/result/${sessionId}/${session.currentIndex}`);
+    } catch (submitError) {
+      setError(submitError.message || "批改失败了，请稍后重试。");
+      setLoading(false);
+    }
   }
 
   async function skip() {
@@ -107,7 +114,9 @@ export default function QuizPage() {
         <VoiceAnswer value={answer} onChange={setAnswer} disabled={loading || skipLoading} />
       )}
 
-      <LoadingButton className="primary-button full" loading={loading} onClick={submit} disabled={!answer || skipLoading}>
+      {error && <div className="notice error">{error}</div>}
+
+      <LoadingButton className="primary-button full" loading={loading} loadingText="批改中，马上给出结果" onClick={submit} disabled={!answer || skipLoading}>
         提交批改
         <Send size={18} />
       </LoadingButton>

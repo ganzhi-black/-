@@ -17,6 +17,9 @@ const SYSTEM_PROMPT =
   "You are a strict but fair exam grader. Grade only against the given standard points and source text. Accept semantically equivalent answers, especially speech-to-text paraphrases, but do not reward vague, random, unrelated, or fabricated answers.";
 
 const SOURCE_LOCATION = "\u539f\u6587\u51fa\u5904";
+const DEFAULT_GRADE_TIMEOUT_MS = 8000;
+const DEFAULT_GRADING_SOURCE_CHAR_LIMIT = 1200;
+const DEFAULT_GRADING_ANSWER_CHAR_LIMIT = 2500;
 
 function getProvider() {
   if (process.env.DEEPSEEK_API_KEY || process.env.AI_PROVIDER === "deepseek") return "deepseek";
@@ -40,6 +43,11 @@ function parseJson(text) {
 
 function normalizeText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function limitText(value, maxLength) {
+  const text = normalizeText(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function termsOf(text) {
@@ -99,6 +107,12 @@ function fallbackGrade({ question, answer, mode }) {
 }
 
 function buildPrompt({ question, answer, mode }) {
+  const sourceLimit = Math.max(300, Number(process.env.GRADING_SOURCE_CHAR_LIMIT || DEFAULT_GRADING_SOURCE_CHAR_LIMIT));
+  const answerLimit = Math.max(300, Number(process.env.GRADING_ANSWER_CHAR_LIMIT || DEFAULT_GRADING_ANSWER_CHAR_LIMIT));
+  const evidenceQuote = limitText(question.evidenceQuote || "", 320);
+  const sourceText = limitText(question.sourceText || evidenceQuote, sourceLimit);
+  const studentAnswer = limitText(answer, answerLimit);
+
   return [
     "Grade this subjective exam answer in Chinese.",
     "Rules:",
@@ -117,20 +131,21 @@ function buildPrompt({ question, answer, mode }) {
     `Question: ${question.title}`,
     "Standard keyPoints:",
     JSON.stringify(question.keyPoints || [], null, 2),
-    `Evidence quote: ${question.evidenceQuote || ""}`,
-    `Source text: ${question.sourceText || ""}`,
-    `Student answer: ${answer}`,
+    `Evidence quote: ${evidenceQuote}`,
+    `Source text excerpt: ${sourceText}`,
+    `Student answer: ${studentAnswer}`,
     "JSON schema:",
     JSON.stringify(GRADE_SCHEMA, null, 2),
   ].join("\n");
 }
 
-async function callDeepSeek(prompt) {
+async function callDeepSeek(prompt, { signal } = {}) {
   const apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("DEEPSEEK_API_KEY is required to grade answers.");
 
   const response = await fetch(`${normalizeBaseUrl(process.env.DEEPSEEK_BASE_URL)}/chat/completions`, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
@@ -143,7 +158,7 @@ async function callDeepSeek(prompt) {
       ],
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: 2000,
+      max_tokens: Number(process.env.DEEPSEEK_GRADE_MAX_TOKENS || 900),
     }),
   });
 
@@ -155,9 +170,10 @@ async function callDeepSeek(prompt) {
   return response.json();
 }
 
-async function callOpenAi(prompt) {
+async function callOpenAi(prompt, { signal } = {}) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -236,14 +252,26 @@ export async function gradeSubjectiveAnswer({ question, answer, mode }) {
   const fallback = fallbackGrade({ question, answer, mode });
   if (getProvider() === "none") return fallback;
 
+  const timeoutMs = Math.max(1000, Number(process.env.AI_GRADE_TIMEOUT_MS || DEFAULT_GRADE_TIMEOUT_MS));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const prompt = buildPrompt({ question, answer, mode });
     const provider = getProvider();
-    const payload = provider === "deepseek" ? await callDeepSeek(prompt) : await callOpenAi(prompt);
+    const payload = provider === "deepseek" ? await callDeepSeek(prompt, { signal: controller.signal }) : await callOpenAi(prompt, { signal: controller.signal });
     const text = provider === "deepseek" ? extractDeepSeekOutputText(payload) : extractOpenAiOutputText(payload);
     return normalizeGrade(parseJson(text), question);
   } catch (error) {
-    console.warn("AI grading failed; using strict local fallback.", error.message);
-    return fallback;
+    const timedOut = error?.name === "AbortError";
+    console.warn(timedOut ? `AI grading timed out after ${timeoutMs}ms; using local fallback.` : "AI grading failed; using strict local fallback.", error.message);
+    return {
+      ...fallback,
+      advice: `${fallback.advice}${timedOut ? "（AI 批改响应较慢，本次先用快速评分给出结果。）" : ""}`,
+      gradingFallback: true,
+      gradingTimedOut: timedOut,
+    };
+  } finally {
+    clearTimeout(timeout);
   }
 }

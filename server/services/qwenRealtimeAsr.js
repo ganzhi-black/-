@@ -3,6 +3,7 @@ import { WebSocket, WebSocketServer } from "ws";
 
 const DEFAULT_ENDPOINT = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
 const DEFAULT_MODEL = "fun-asr-realtime";
+const DEFAULT_READY_TIMEOUT_MS = 8000;
 
 function sendJson(ws, payload) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -96,6 +97,8 @@ export function setupQwenRealtimeAsr(server) {
     const queuedAudioFrames = [];
     let taskStarted = false;
     let taskFinished = false;
+    const startedAt = performance.now();
+    const readyTimeoutMs = Math.max(1000, Number(process.env.ASR_READY_TIMEOUT_MS || DEFAULT_READY_TIMEOUT_MS));
 
     const qwenWs = new WebSocket(process.env.QWEN_ASR_ENDPOINT || DEFAULT_ENDPOINT, {
       headers: {
@@ -103,6 +106,14 @@ export function setupQwenRealtimeAsr(server) {
         "user-agent": "qimoshua-ai-trainer/1.0",
       },
     });
+    const readyTimeout = setTimeout(() => {
+      if (taskStarted || taskFinished) return;
+      sendJson(clientWs, { type: "error", error: "语音识别连接超时，请重试。" });
+      if (qwenWs.readyState === WebSocket.OPEN || qwenWs.readyState === WebSocket.CONNECTING) {
+        qwenWs.close(1000, "asr ready timeout");
+      }
+      if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
+    }, readyTimeoutMs);
 
     qwenWs.on("open", () => {
       qwenWs.send(JSON.stringify(createRunTaskMessage(taskId)));
@@ -120,6 +131,8 @@ export function setupQwenRealtimeAsr(server) {
 
       if (message?.header?.event === "task-started") {
         taskStarted = true;
+        clearTimeout(readyTimeout);
+        console.log(`[asr] task=${taskId} ready=${Math.round(performance.now() - startedAt)}ms queuedFrames=${queuedAudioFrames.length}`);
         while (queuedAudioFrames.length && qwenWs.readyState === WebSocket.OPEN) {
           qwenWs.send(queuedAudioFrames.shift());
         }
@@ -137,6 +150,7 @@ export function setupQwenRealtimeAsr(server) {
     });
 
     qwenWs.on("close", () => {
+      clearTimeout(readyTimeout);
       if (!taskFinished) sendJson(clientWs, { type: "finished" });
       if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
     });

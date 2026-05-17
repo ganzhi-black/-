@@ -27,6 +27,9 @@ function getVisitorId() {
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Visitor-Id", getVisitorId());
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
 
   let response;
   try {
@@ -34,9 +37,15 @@ async function request(path, options = {}) {
       ...options,
       headers,
       credentials: "include",
+      signal: controller?.signal || options.signal,
     });
   } catch (error) {
-    throw new Error("后端服务没有连上，请先启动后端服务，或检查数据库连接。");
+    if (error?.name === "AbortError") {
+      throw new Error("请求超时了，请稍后重试。");
+    }
+    throw new Error("网络连接失败，请检查网络后重试。");
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
   const payload = await response.json().catch(() => ({}));
 
@@ -362,6 +371,7 @@ export const api = {
         answer,
         mode: session.mode,
       }),
+      timeoutMs: 20000,
     });
 
     const answerRecord = {

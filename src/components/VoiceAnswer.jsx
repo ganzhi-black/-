@@ -50,6 +50,7 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
   const processorRef = useRef(null);
   const streamRef = useRef(null);
   const socketRef = useRef(null);
+  const socketCloseTimerRef = useRef(null);
   const baseTextRef = useRef("");
   const finalTextRef = useRef("");
   const partialTextRef = useRef("");
@@ -81,7 +82,7 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
     if (!socket) return;
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "finish" }));
-      setTimeout(() => socket.close(), 300);
+      socketCloseTimerRef.current = setTimeout(() => socket.close(), 3000);
     } else {
       socket.close();
     }
@@ -94,6 +95,7 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
 
     setError("");
     setConnecting(true);
+    if (socketCloseTimerRef.current) clearTimeout(socketCloseTimerRef.current);
     baseTextRef.current = value || "";
     finalTextRef.current = "";
     partialTextRef.current = "";
@@ -124,6 +126,12 @@ export default function VoiceAnswer({ value, onChange, disabled }) {
             partialTextRef.current = "";
             renderTranscript();
           }
+          return;
+        }
+
+        if (message.type === "finished") {
+          if (socketCloseTimerRef.current) clearTimeout(socketCloseTimerRef.current);
+          socket.close();
           return;
         }
 

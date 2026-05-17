@@ -14,6 +14,10 @@ function questionTypeLabel(type) {
   return "论述题";
 }
 
+function safeIndex(value) {
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
 export default function QuizPage() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -27,25 +31,33 @@ export default function QuizPage() {
     api.getSession(sessionId).then(setSession);
   }, [sessionId]);
 
-  const question = session?.questions[session.currentIndex];
+  const questions = Array.isArray(session?.questions) ? session.questions : [];
+  const answers = Array.isArray(session?.answers) ? session.answers : [];
+  const currentIndex = safeIndex(session?.currentIndex);
+  const question = questions[currentIndex];
+  const options = Array.isArray(question?.options) ? question.options : [];
+
   const previousAnswer = useMemo(() => {
-    if (!session || !question) return "";
-    return session.answers.find((item) => item.questionIndex === session.currentIndex)?.userAnswer || "";
-  }, [session, question]);
+    if (!question) return "";
+    return answers.find((item) => item.questionIndex === currentIndex)?.userAnswer || "";
+  }, [answers, currentIndex, question]);
 
   useEffect(() => {
     setAnswer(previousAnswer);
+    setError("");
   }, [previousAnswer, question?.id]);
 
   async function submit() {
-    if (!answer) return;
+    if (!answer || !question || loading) return;
     setLoading(true);
     setError("");
+
     try {
-      await api.submitAnswer({ sessionId, questionIndex: session.currentIndex, answer });
-      navigate(`/result/${sessionId}/${session.currentIndex}`);
+      await api.submitAnswer({ sessionId, questionIndex: currentIndex, answer });
+      navigate(`/result/${sessionId}/${currentIndex}`);
     } catch (submitError) {
-      setError(submitError.message || "批改失败了，请稍后重试。");
+      const message = submitError.message || "";
+      setError(message.includes("Cannot read") ? "批改数据没有同步好，请刷新后重试。" : message || "批改失败了，请稍后重试。");
       setLoading(false);
     }
   }
@@ -53,9 +65,8 @@ export default function QuizPage() {
   async function skip() {
     if (!session || skipLoading) return;
     setSkipLoading(true);
-    const currentIndex = session.currentIndex;
     const nextIndex = currentIndex + 1;
-    const isLast = currentIndex >= session.questions.length - 1;
+    const isLast = currentIndex >= questions.length - 1;
 
     updateState((draft) => {
       const current = draft.sessions.find((item) => item.id === sessionId);
@@ -89,9 +100,9 @@ export default function QuizPage() {
         </Link>
         <div>
           <p>
-            第 {session.currentIndex + 1} 题 / 共 {session.questions.length} 题
+            第 {currentIndex + 1} 题 / 共 {questions.length} 题
           </p>
-          <ProgressDots total={session.questions.length} current={session.currentIndex} />
+          <ProgressDots total={questions.length} current={currentIndex} />
         </div>
       </section>
 
@@ -102,7 +113,7 @@ export default function QuizPage() {
 
       {question.type === "single" ? (
         <div className="answers-list">
-          {question.options.map((option) => (
+          {options.map((option) => (
             <button key={option.label} className={`answer-option ${answer === option.label ? "selected" : ""}`} onClick={() => setAnswer(option.label)} disabled={loading || skipLoading}>
               <span>{option.label}</span>
               <strong>{option.text}</strong>

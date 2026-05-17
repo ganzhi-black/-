@@ -112,6 +112,17 @@ function normalizeSubject(subject) {
   };
 }
 
+function normalizeSession(session) {
+  return {
+    ...session,
+    questions: Array.isArray(session?.questions) ? session.questions : [],
+    answers: Array.isArray(session?.answers) ? session.answers : [],
+    retryMistakeIds: Array.isArray(session?.retryMistakeIds) ? session.retryMistakeIds : [],
+    skippedQuestionIndexes: Array.isArray(session?.skippedQuestionIndexes) ? session.skippedQuestionIndexes : [],
+    currentIndex: Number.isFinite(Number(session?.currentIndex)) ? Number(session.currentIndex) : 0,
+  };
+}
+
 function countGeneratedQuestions(state, subjectId) {
   return state.sessions
     .filter((session) => session.subjectId === subjectId)
@@ -331,13 +342,15 @@ export const api = {
         mode,
       });
 
+      const normalizedSession = normalizeSession(session);
+
       updateState((draft) => {
-        draft.sessions.unshift(session);
+        draft.sessions.unshift(normalizedSession);
         const subject = draft.subjects.find((item) => item.id === subjectId);
         if (subject) subject.lastPracticeAt = new Date().toISOString();
       });
 
-      return session;
+      return normalizedSession;
     } catch (error) {
       throw new Error(`AI 出题失败：${error.message}`);
     }
@@ -345,7 +358,7 @@ export const api = {
 
   async getSession(sessionId) {
     try {
-      const session = await request(`/api/sessions/${sessionId}`);
+      const session = normalizeSession(await request(`/api/sessions/${sessionId}`));
       updateState((draft) => {
         const index = draft.sessions.findIndex((item) => item.id === session.id);
         if (index >= 0) draft.sessions[index] = { ...draft.sessions[index], ...session };
@@ -358,15 +371,17 @@ export const api = {
   },
 
   async submitAnswer({ sessionId, questionIndex, answer }) {
-    const session = loadState().sessions.find((item) => item.id === sessionId);
-    if (!session) {
+    const rawSession = loadState().sessions.find((item) => item.id === sessionId);
+    if (!rawSession) {
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }
-    if (session.retryMistakeIds?.length > 0) {
+    const session = normalizeSession(rawSession);
+    if (session.retryMistakeIds.length > 0) {
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }
 
     const question = session.questions[questionIndex];
+    if (!question) throw new Error("当前题目不存在，请返回重新开始练习。");
     const { result, answerId, createdAt } = await request("/api/answers/grade", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -388,7 +403,7 @@ export const api = {
       question: { ...question, subjectId: question.subjectId || session.subjectId },
       userAnswer: answer,
       result,
-      isRetry: session.retryMistakeIds?.length > 0,
+      isRetry: session.retryMistakeIds.length > 0,
       createdAt: createdAt || new Date().toISOString(),
     };
     await track("answer_submitted", {
@@ -402,6 +417,8 @@ export const api = {
 
     updateState((draft) => {
       const current = draft.sessions.find((item) => item.id === sessionId);
+      if (!current) return;
+      current.answers = Array.isArray(current.answers) ? current.answers : [];
       current.answers = current.answers.filter((item) => item.questionIndex !== questionIndex);
       current.answers.push(answerRecord);
       draft.answers.push(answerRecord);

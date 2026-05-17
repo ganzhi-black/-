@@ -246,7 +246,12 @@ export const api = {
     let saved;
     updateState((draft) => {
       const session = draft.sessions.find((item) => item.id === sessionId);
+      if (!session) throw new Error("Session not found.");
+      session.questions = Array.isArray(session.questions) ? session.questions : [];
+      session.answers = Array.isArray(session.answers) ? session.answers : [];
+      session.retryMistakeIds = Array.isArray(session.retryMistakeIds) ? session.retryMistakeIds : [];
       const question = session.questions[questionIndex];
+      if (!question) throw new Error("Question not found.");
       const result = question.type === "single" ? gradeSingle(question, answer) : gradeSubjective(question, answer, session.mode);
       const answerRecord = {
         id: uid("ans"),

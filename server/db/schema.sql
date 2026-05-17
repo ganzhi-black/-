@@ -70,7 +70,9 @@ create table if not exists questions (
   title text not null,
   options jsonb,
   correct_answer text,
+  key_points text[] not null default '{}',
   explanation text,
+  evidence_quote text,
   source_chunk_ids uuid[] not null default '{}',
   document_hash text,
   created_at timestamptz not null default now()

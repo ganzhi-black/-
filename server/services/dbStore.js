@@ -85,6 +85,8 @@ async function ensureSchema(pool) {
   await pool.query("create index if not exists auth_sessions_expires_idx on auth_sessions(expires_at)");
   await pool.query("alter table documents add column if not exists content_hash text");
   await pool.query("alter table questions add column if not exists document_hash text");
+  await pool.query("alter table questions add column if not exists key_points text[] not null default '{}'");
+  await pool.query("alter table questions add column if not exists evidence_quote text");
   await pool.query("create index if not exists documents_content_hash_idx on documents(content_hash)");
   await pool.query("create index if not exists questions_document_hash_idx on questions(document_hash)");
   await pool.query(`
@@ -429,20 +431,27 @@ export async function createDbStore(databaseUrl) {
       const result = await pool.query(
         `
           select
-            id,
-            subject_id,
-            type,
-            title,
-            options,
-            correct_answer,
-            explanation,
-            source_chunk_ids,
-            created_at
-          from questions
-          where user_id = $1
-            and subject_id = $2
-            and type = any($3::text[])
-          order by created_at desc
+            q.id,
+            q.subject_id,
+            q.type,
+            q.title,
+            q.options,
+            q.correct_answer,
+            q.key_points,
+            q.explanation,
+            q.evidence_quote,
+            q.source_chunk_ids,
+            coalesce((
+              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
+              from document_chunks dc
+              where dc.id = any(q.source_chunk_ids)
+            ), '') as source_text,
+            q.created_at
+          from questions q
+          where q.user_id = $1
+            and q.subject_id = $2
+            and q.type = any($3::text[])
+          order by q.created_at desc
           limit $4
         `,
         [userId, subjectId, types, limit],
@@ -456,10 +465,10 @@ export async function createDbStore(databaseUrl) {
         options: row.options,
         correctAnswer: row.correct_answer,
         explanation: row.explanation,
-        keyPoints: [],
-        evidenceQuote: "",
+        keyPoints: row.key_points || [],
+        evidenceQuote: row.evidence_quote || "",
         sourceChunkIds: row.source_chunk_ids || [],
-        sourceText: "",
+        sourceText: row.source_text || "",
         sourceLocation: "原文出处",
       }));
     },
@@ -547,11 +556,13 @@ export async function createDbStore(databaseUrl) {
               title,
               options,
               correct_answer,
+              key_points,
               explanation,
+              evidence_quote,
               source_chunk_ids,
               document_hash
             )
-            values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::uuid[], $9)
+            values ($1, $2, $3, $4, $5::jsonb, $6, $7::text[], $8, $9::uuid[], $10)
             returning id
           `,
           [
@@ -561,7 +572,9 @@ export async function createDbStore(databaseUrl) {
             question.title,
             question.options ? JSON.stringify(question.options) : null,
             question.correctAnswer,
+            Array.isArray(question.keyPoints) ? question.keyPoints : [],
             question.explanation,
+            question.evidenceQuote || "",
             question.sourceChunkIds,
             documentHash,
           ],
@@ -612,19 +625,26 @@ export async function createDbStore(databaseUrl) {
       const questionsResult = await pool.query(
         `
           select
-            id,
-            subject_id,
-            type,
-            title,
-            options,
-            correct_answer,
-            explanation,
-            source_chunk_ids,
-            created_at
-          from questions
-          where user_id = $1
-            and id = any($2::uuid[])
-          order by array_position($2::uuid[], id)
+            q.id,
+            q.subject_id,
+            q.type,
+            q.title,
+            q.options,
+            q.correct_answer,
+            q.key_points,
+            q.explanation,
+            q.evidence_quote,
+            q.source_chunk_ids,
+            coalesce((
+              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
+              from document_chunks dc
+              where dc.id = any(q.source_chunk_ids)
+            ), '') as source_text,
+            q.created_at
+          from questions q
+          where q.user_id = $1
+            and q.id = any($2::uuid[])
+          order by array_position($2::uuid[], q.id)
         `,
         [userId, session.question_ids],
       );
@@ -636,11 +656,11 @@ export async function createDbStore(databaseUrl) {
         options: row.options,
         correctAnswer: row.correct_answer,
         explanation: row.explanation,
-        keyPoints: [],
-        evidenceQuote: "",
+        keyPoints: row.key_points || [],
+        evidenceQuote: row.evidence_quote || "",
         sourceChunkIds: row.source_chunk_ids || [],
-        sourceText: "",
-        sourceLocation: "",
+        sourceText: row.source_text || "",
+        sourceLocation: "原文出处",
       }));
       const questionIndexById = new Map(questions.map((question, index) => [question.id, index]));
 
@@ -794,8 +814,15 @@ export async function createDbStore(databaseUrl) {
             q.title,
             q.options,
             q.correct_answer,
+            q.key_points,
             q.explanation,
+            q.evidence_quote,
             q.source_chunk_ids,
+            coalesce((
+              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
+              from document_chunks dc
+              where dc.id = any(q.source_chunk_ids)
+            ), '') as source_text,
             a.user_answer,
             a.result,
             a.accuracy,
@@ -819,8 +846,12 @@ export async function createDbStore(databaseUrl) {
           title: row.title,
           options: row.options,
           correctAnswer: row.correct_answer,
+          keyPoints: row.key_points || [],
           explanation: row.explanation,
+          evidenceQuote: row.evidence_quote || "",
           sourceChunkIds: row.source_chunk_ids || [],
+          sourceText: row.source_text || "",
+          sourceLocation: "原文出处",
         },
         lastAnswer: row.user_answer || "",
         lastResult: row.result || {},

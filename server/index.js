@@ -284,9 +284,11 @@ async function getPracticeSources({ visitorId, subjectId, amount, types }) {
 }
 
 async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
+  const startedAt = performance.now();
   const safeAmount = Math.min(50, Math.max(1, Number(amount) || 5));
   const requestedTypes = Array.isArray(types) && types.length ? types : ["single"];
   const sources = await getPracticeSources({ visitorId, subjectId, amount: safeAmount, types: requestedTypes });
+  const retrievedAt = performance.now();
   const documentHashes = store.getDocumentHashesForSubject ? await store.getDocumentHashesForSubject({ visitorId, subjectId }) : [];
   const priorQuestions = store.getPriorQuestionsByDocumentHashes
     ? await store.getPriorQuestionsByDocumentHashes({ visitorId, documentHashes, types: requestedTypes, limit: 500 })
@@ -294,18 +296,34 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
   const currentSubjectQuestions = store.getRecentQuestions
     ? await store.getRecentQuestions({ visitorId, subjectId, types: requestedTypes, limit: 500 })
     : [];
+  const historyLoadedAt = performance.now();
   const questions = await generateQuestionsFromSources({
     sources,
     types: requestedTypes,
     amount: safeAmount,
     excludedQuestions: [...priorQuestions, ...currentSubjectQuestions],
   });
+  const generatedAt = performance.now();
   const savedQuestions = await store.saveQuestions({ visitorId, subjectId, questions, documentHash: documentHashes[0] || null });
+  const savedAt = performance.now();
+  const timings = {
+    retrievalMs: Math.round(retrievedAt - startedAt),
+    historyMs: Math.round(historyLoadedAt - retrievedAt),
+    generationMs: Math.round(generatedAt - historyLoadedAt),
+    saveMs: Math.round(savedAt - generatedAt),
+    totalMs: Math.round(savedAt - startedAt),
+  };
+
+  console.log(
+    `[questions] subject=${subjectId} amount=${safeAmount} types=${requestedTypes.join(",")} sources=${sources.length} ` +
+      `retrieval=${timings.retrievalMs}ms history=${timings.historyMs}ms generation=${timings.generationMs}ms save=${timings.saveMs}ms total=${timings.totalMs}ms`,
+  );
 
   return {
     questions: savedQuestions,
     sourceChunkCount: sources.length,
     cached: false,
+    timings,
   };
 }
 
@@ -569,6 +587,7 @@ app.get("/api/sessions/:sessionId", async (req, res, next) => {
 
 app.post("/api/answers/grade", async (req, res, next) => {
   try {
+    const startedAt = performance.now();
     const question = req.body?.question;
     const answer = String(req.body?.answer || "").trim();
     const mode = String(req.body?.mode || "relaxed");
@@ -581,6 +600,7 @@ app.post("/api/answers/grade", async (req, res, next) => {
       question.type === "single"
         ? gradeSingleAnswer({ question, answer })
         : await gradeSubjectiveAnswer({ question, answer, mode });
+    const gradedAt = performance.now();
 
     let savedAnswer = null;
     if (sessionId && store.saveAnswer) {
@@ -592,6 +612,12 @@ app.post("/api/answers/grade", async (req, res, next) => {
         result,
       });
     }
+    const savedAt = performance.now();
+
+    console.log(
+      `[grade] session=${sessionId || "none"} question=${question.id} type=${question.type} ` +
+        `grade=${Math.round(gradedAt - startedAt)}ms save=${Math.round(savedAt - gradedAt)}ms total=${Math.round(savedAt - startedAt)}ms`,
+    );
 
     res.json({ result, answerId: savedAnswer?.id || null, createdAt: savedAnswer?.createdAt || null });
   } catch (error) {

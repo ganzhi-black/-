@@ -220,7 +220,7 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
         .join("\n")
     : "无";
 
-  return [
+  if (false) return [
     `请生成 ${amount} 道期末复习题，请尽量按这个题型顺序生成：${requestedTypes.join("、")}。`,
     "如果请求题型与资料内容性质冲突，内容性质优先：例如名词解释内容不能硬出成论述题。",
     "禁止生成“历史已出题目清单”中已经出现过的题目；不要只改几个字、换一个问法后重复考同一个题干。",
@@ -320,7 +320,7 @@ async function callDeepSeek(prompt) {
       ],
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: 12000,
+      max_tokens: Number(process.env.DEEPSEEK_MAX_TOKENS || 6000),
     }),
   });
 

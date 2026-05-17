@@ -370,8 +370,8 @@ export const api = {
     }
   },
 
-  async submitAnswer({ sessionId, questionIndex, answer }) {
-    const rawSession = loadState().sessions.find((item) => item.id === sessionId);
+  async submitAnswer({ sessionId, questionIndex, answer, sessionSnapshot = null }) {
+    const rawSession = sessionSnapshot || loadState().sessions.find((item) => item.id === sessionId);
     if (!rawSession) {
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }

@@ -99,7 +99,7 @@ function makeSubjectiveQuestion(subjectId, type, index) {
 }
 
 function gradeSubjective(question, userText, mode) {
-  const points = question.keyPoints.length ? question.keyPoints : randomItem(sourceTexts).points;
+  const points = Array.isArray(question.keyPoints) && question.keyPoints.length ? question.keyPoints : randomItem(sourceTexts).points;
   const shuffled = shuffle(points);
   const min = mode === "strict" ? 40 : 52;
   const max = mode === "strict" ? 86 : 92;

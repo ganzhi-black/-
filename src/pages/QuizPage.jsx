@@ -8,10 +8,10 @@ import { api } from "../services/api.js";
 import { updateState } from "../services/storage.js";
 
 function questionTypeLabel(type) {
-  if (type === "single") return "单选题";
-  if (type === "term") return "名词解释";
-  if (type === "short") return "简答题";
-  return "论述题";
+  if (type === "single") return "Single choice";
+  if (type === "term") return "Term";
+  if (type === "short") return "Short answer";
+  return "Essay";
 }
 
 function safeIndex(value) {
@@ -53,11 +53,11 @@ export default function QuizPage() {
     setError("");
 
     try {
-      await api.submitAnswer({ sessionId, questionIndex: currentIndex, answer });
+      await api.submitAnswer({ sessionId, questionIndex: currentIndex, answer, sessionSnapshot: session });
       navigate(`/result/${sessionId}/${currentIndex}`);
     } catch (submitError) {
       const message = submitError.message || "";
-      setError(message.includes("Cannot read") ? "批改数据没有同步好，请刷新后重试。" : message || "批改失败了，请稍后重试。");
+      setError(message.includes("Cannot read") ? "Grading data is out of sync. Please refresh and retry." : message || "Grading failed. Please retry.");
       setLoading(false);
     }
   }
@@ -100,7 +100,7 @@ export default function QuizPage() {
         </Link>
         <div>
           <p>
-            第 {currentIndex + 1} 题 / 共 {questions.length} 题
+            Question {currentIndex + 1} / {questions.length}
           </p>
           <ProgressDots total={questions.length} current={currentIndex} />
         </div>
@@ -127,12 +127,12 @@ export default function QuizPage() {
 
       {error && <div className="notice error">{error}</div>}
 
-      <LoadingButton className="primary-button full" loading={loading} loadingText="批改中，马上给出结果" onClick={submit} disabled={!answer || skipLoading}>
-        提交批改
+      <LoadingButton className="primary-button full" loading={loading} loadingText="Grading..." onClick={submit} disabled={!answer || skipLoading}>
+        Submit
         <Send size={18} />
       </LoadingButton>
       <LoadingButton className="secondary-button full" loading={skipLoading} onClick={skip} disabled={loading}>
-        跳过此题
+        Skip
         <SkipForward size={18} />
       </LoadingButton>
     </div>

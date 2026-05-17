@@ -4,6 +4,7 @@ import { repairText } from "../utils/textRepair.js";
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
 export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? "" : "http://localhost:8787");
+const configuredRealtimeAsrUrl = import.meta.env.VITE_REALTIME_ASR_URL?.trim();
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
 
 function createVisitorId() {
@@ -85,6 +86,10 @@ export async function transcribeAudio(audioBlob) {
 }
 
 export function createRealtimeAudioSocket() {
+  if (configuredRealtimeAsrUrl) {
+    return new WebSocket(configuredRealtimeAsrUrl);
+  }
+
   const socketHttpBaseUrl = API_BASE_URL || window.location.origin;
   const wsBaseUrl = socketHttpBaseUrl.replace(/^http/i, (protocol) => (protocol.toLowerCase() === "https" ? "wss" : "ws"));
   return new WebSocket(`${wsBaseUrl}/api/audio/realtime`);

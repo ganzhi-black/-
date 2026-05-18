@@ -50,6 +50,17 @@ function limitText(value, maxLength) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+function standardPointsOf(question) {
+  const keyPoints = Array.isArray(question.keyPoints) ? question.keyPoints.map(normalizeText).filter(Boolean) : [];
+  if (keyPoints.length) return keyPoints;
+
+  return normalizeText(question.explanation || question.evidenceQuote || question.sourceText)
+    .split(/[。！？；.!?;]\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 8)
+    .slice(0, 6);
+}
+
 function termsOf(text) {
   const normalized = normalizeText(text);
   const chinese = normalized.match(/[\u4e00-\u9fff]{2,8}/g) || [];
@@ -59,7 +70,7 @@ function termsOf(text) {
 
 function fallbackGrade({ question, answer, mode }) {
   const userAnswer = normalizeText(answer);
-  const keyPoints = Array.isArray(question.keyPoints) ? question.keyPoints.map(normalizeText).filter(Boolean) : [];
+  const keyPoints = standardPointsOf(question);
 
   if (userAnswer.length < 8) {
     return {
@@ -110,6 +121,7 @@ function buildPrompt({ question, answer, mode }) {
   const sourceLimit = Math.max(300, Number(process.env.GRADING_SOURCE_CHAR_LIMIT || DEFAULT_GRADING_SOURCE_CHAR_LIMIT));
   const answerLimit = Math.max(300, Number(process.env.GRADING_ANSWER_CHAR_LIMIT || DEFAULT_GRADING_ANSWER_CHAR_LIMIT));
   const evidenceQuote = limitText(question.evidenceQuote || "", 320);
+  const explanation = limitText(question.explanation || "", 700);
   const sourceText = limitText(question.sourceText || evidenceQuote, sourceLimit);
   const studentAnswer = limitText(answer, answerLimit);
 
@@ -130,7 +142,8 @@ function buildPrompt({ question, answer, mode }) {
     `Question type: ${question.type}`,
     `Question: ${question.title}`,
     "Standard keyPoints:",
-    JSON.stringify(question.keyPoints || [], null, 2),
+    JSON.stringify(standardPointsOf(question), null, 2),
+    `Reference explanation: ${explanation}`,
     `Evidence quote: ${evidenceQuote}`,
     `Source text excerpt: ${sourceText}`,
     `Student answer: ${studentAnswer}`,
@@ -215,7 +228,7 @@ function extractDeepSeekOutputText(payload) {
 }
 
 function normalizeGrade(grade, question) {
-  const keyPoints = Array.isArray(question.keyPoints) ? question.keyPoints.map(normalizeText).filter(Boolean) : [];
+  const keyPoints = standardPointsOf(question);
   const covered = Array.isArray(grade.coveredPoints) ? grade.coveredPoints.map(normalizeText).filter(Boolean) : [];
   const missed = Array.isArray(grade.missedPoints) ? grade.missedPoints.map(normalizeText).filter(Boolean) : [];
   const accuracy = Math.max(0, Math.min(100, Math.round(Number(grade.accuracy) || 0)));
@@ -230,6 +243,27 @@ function normalizeGrade(grade, question) {
     evidenceQuote: normalizeText(grade.evidenceQuote || question.evidenceQuote).slice(0, 260),
     sourceText: question.sourceText,
     sourceLocation: SOURCE_LOCATION,
+  };
+}
+
+function reconcileGradeWithFallback(modelGrade, fallback) {
+  const modelCovered = Array.isArray(modelGrade.coveredPoints) ? modelGrade.coveredPoints.length : 0;
+  const modelMissed = Array.isArray(modelGrade.missedPoints) ? modelGrade.missedPoints.length : 0;
+  const fallbackCovered = Array.isArray(fallback.coveredPoints) ? fallback.coveredPoints.length : 0;
+
+  const modelLooksEmpty = modelCovered === 0 && modelMissed > 0;
+  const fallbackLooksConfident = fallback.accuracy >= 70 && fallbackCovered > 0;
+
+  if (!modelLooksEmpty || !fallbackLooksConfident) return modelGrade;
+
+  return {
+    ...modelGrade,
+    accuracy: Math.max(modelGrade.accuracy, fallback.accuracy),
+    isCorrect: fallback.isCorrect,
+    coveredPoints: fallback.coveredPoints,
+    missedPoints: fallback.missedPoints,
+    extractedPoints: modelGrade.extractedPoints?.length ? modelGrade.extractedPoints : fallback.extractedPoints,
+    advice: "你的回答已经覆盖主要要点，系统已按标准要点进行语义兜底校正。建议再对照原文补充表述层次。",
   };
 }
 
@@ -261,7 +295,7 @@ export async function gradeSubjectiveAnswer({ question, answer, mode }) {
     const provider = getProvider();
     const payload = provider === "deepseek" ? await callDeepSeek(prompt, { signal: controller.signal }) : await callOpenAi(prompt, { signal: controller.signal });
     const text = provider === "deepseek" ? extractDeepSeekOutputText(payload) : extractOpenAiOutputText(payload);
-    return normalizeGrade(parseJson(text), question);
+    return reconcileGradeWithFallback(normalizeGrade(parseJson(text), question), fallback);
   } catch (error) {
     const timedOut = error?.name === "AbortError";
     console.warn(timedOut ? `AI grading timed out after ${timeoutMs}ms; using local fallback.` : "AI grading failed; using strict local fallback.", error.message);

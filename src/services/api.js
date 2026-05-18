@@ -493,4 +493,14 @@ export const api = {
 
     return normalized.filter((item) => item.subjectId && (!subjectId || item.subjectId === subjectId));
   },
+
+  async deleteMistake(mistakeId) {
+    await request(`/api/mistakes/${mistakeId}`, {
+      method: "DELETE",
+    });
+    updateState((draft) => {
+      draft.mistakes = draft.mistakes.filter((item) => item.id !== mistakeId);
+    });
+    window.dispatchEvent(new Event("qimoshua:state-change"));
+  },
 };

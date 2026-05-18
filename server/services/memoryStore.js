@@ -292,6 +292,14 @@ export function createMemoryStore() {
         });
     },
 
+    deleteMistake({ visitorId, mistakeId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const index = mistakes.findIndex((item) => item.visitorId === ownerId && item.id === mistakeId);
+      if (index < 0) return false;
+      mistakes.splice(index, 1);
+      return true;
+    },
+
     getAdminMetrics() {
       const startOfToday = new Date();
       startOfToday.setHours(0, 0, 0, 0);

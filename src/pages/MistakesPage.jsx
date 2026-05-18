@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, LibraryBig, RotateCcw } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, LibraryBig, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import EmptyState from "../components/EmptyState.jsx";
@@ -20,6 +20,7 @@ export default function MistakesPage() {
   const [mistakes, setMistakes] = useState(null);
   const [dashboard, setDashboard] = useState(null);
   const [loadingId, setLoadingId] = useState("");
+  const [deletingId, setDeletingId] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -59,6 +60,17 @@ export default function MistakesPage() {
       retryQuestions: items,
     });
     navigate(`/quiz/${session.id}`);
+  }
+
+  async function deleteMistake(item) {
+    if (!window.confirm(`确定删除这道错题吗？\n\n${repairText(item.question.title)}`)) return;
+    setDeletingId(item.id);
+    try {
+      await api.deleteMistake(item.id);
+      setMistakes((current) => (current || []).filter((mistake) => mistake.id !== item.id));
+    } finally {
+      setDeletingId("");
+    }
   }
 
   if (!mistakes || !dashboard) return <div className="skeleton-page" />;
@@ -147,6 +159,10 @@ export default function MistakesPage() {
                     回到练习设置
                     <ArrowRight size={16} />
                   </Link>
+                  <LoadingButton className="text-link danger-link" loading={deletingId === item.id} onClick={() => deleteMistake(item)}>
+                    <Trash2 size={16} />
+                    删除
+                  </LoadingButton>
                 </div>
               </article>
             ))}

@@ -889,6 +889,12 @@ export async function createDbStore(databaseUrl) {
       }));
     },
 
+    async deleteMistake({ visitorId, mistakeId }) {
+      const userId = await getUserId(visitorId);
+      const result = await pool.query("delete from mistakes where user_id = $1 and id = $2", [userId, mistakeId]);
+      return result.rowCount > 0;
+    },
+
     async getAdminMetrics() {
       const realUserFilter = `
         email is not null

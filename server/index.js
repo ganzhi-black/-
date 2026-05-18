@@ -674,6 +674,17 @@ app.get("/api/mistakes", async (req, res, next) => {
   }
 });
 
+app.delete("/api/mistakes/:mistakeId", async (req, res, next) => {
+  try {
+    if (!store.deleteMistake) return res.status(404).json({ error: "Mistake not found." });
+    const deleted = await store.deleteMistake({ visitorId: req.visitorId, mistakeId: req.params.mistakeId });
+    if (!deleted) return res.status(404).json({ error: "Mistake not found." });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/admin/metrics", requireAdmin, async (req, res, next) => {
   try {
     if (!store.getAdminMetrics) return res.status(501).json({ error: "Metrics store is not available." });

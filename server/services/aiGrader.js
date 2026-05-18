@@ -17,7 +17,7 @@ const SYSTEM_PROMPT =
   "You are a strict but fair exam grader. Grade only against the given standard points and source text. Accept semantically equivalent answers, especially speech-to-text paraphrases, but do not reward vague, random, unrelated, or fabricated answers.";
 
 const SOURCE_LOCATION = "\u539f\u6587\u51fa\u5904";
-const DEFAULT_GRADE_TIMEOUT_MS = 8000;
+const DEFAULT_GRADE_TIMEOUT_MS = 20000;
 const DEFAULT_GRADING_SOURCE_CHAR_LIMIT = 1200;
 const DEFAULT_GRADING_ANSWER_CHAR_LIMIT = 2500;
 

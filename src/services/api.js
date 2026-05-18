@@ -60,9 +60,9 @@ async function request(path, options = {}) {
   return payload;
 }
 
-export async function track(eventName, properties = {}) {
+export function track(eventName, properties = {}) {
   try {
-    await request("/api/analytics/events", {
+    void request("/api/analytics/events", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -71,6 +71,8 @@ export async function track(eventName, properties = {}) {
         sessionId: properties.sessionId || "",
         properties,
       }),
+    }).catch((error) => {
+      console.warn("Analytics event skipped:", error.message);
     });
   } catch (error) {
     console.warn("Analytics event skipped:", error.message);
@@ -401,7 +403,7 @@ export const api = {
         answer,
         mode: session.mode,
       }),
-      timeoutMs: 20000,
+      timeoutMs: 35000,
     });
 
     const answerRecord = {

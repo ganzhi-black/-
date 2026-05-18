@@ -52,10 +52,25 @@ function createCorsOptions() {
   }
 
   const allowedOrigins = new Set(configuredOrigins);
+  function isAllowedOrigin(origin) {
+    if (allowedOrigins.has(origin)) return true;
+    try {
+      const hostname = new URL(origin).hostname;
+      return configuredOrigins.some((allowedOrigin) => {
+        if (!allowedOrigin.includes("*.")) return false;
+        const allowedUrl = new URL(allowedOrigin.replace("*.", ""));
+        const suffix = `.${allowedUrl.hostname}`;
+        return allowedUrl.protocol === new URL(origin).protocol && hostname.endsWith(suffix);
+      });
+    } catch {
+      return false;
+    }
+  }
+
   return {
     credentials: true,
     origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+      if (!origin || isAllowedOrigin(origin)) return callback(null, true);
       return callback(new Error(`CORS origin not allowed: ${origin}`));
     },
   };
@@ -125,7 +140,8 @@ function publicUser(user) {
 
 function sessionCookieOptions() {
   const maxAge = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
-  const sameSite = String(process.env.AUTH_COOKIE_SAMESITE || "lax").toLowerCase();
+  const defaultSameSite = process.env.NODE_ENV === "production" ? "none" : "lax";
+  const sameSite = String(process.env.AUTH_COOKIE_SAMESITE || defaultSameSite).toLowerCase();
   return {
     httpOnly: true,
     sameSite,

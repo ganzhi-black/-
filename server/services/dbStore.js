@@ -90,6 +90,20 @@ async function ensureSchema(pool) {
   await pool.query("create index if not exists documents_content_hash_idx on documents(content_hash)");
   await pool.query("create index if not exists questions_document_hash_idx on questions(document_hash)");
   await pool.query(`
+    create table if not exists answers (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid references users(id) on delete cascade,
+      session_id text,
+      subject_id uuid references subjects(id) on delete cascade,
+      question_id uuid references questions(id) on delete cascade,
+      user_answer text not null,
+      is_correct boolean,
+      accuracy numeric,
+      result jsonb,
+      created_at timestamptz not null default now()
+    )
+  `);
+  await pool.query(`
     create table if not exists practice_sessions (
       id text primary key,
       user_id uuid not null references users(id) on delete cascade,
@@ -112,6 +126,7 @@ async function ensureSchema(pool) {
   await pool.query("alter table answers add column if not exists subject_id uuid references subjects(id) on delete cascade");
   await pool.query("alter table answers add column if not exists is_correct boolean");
   await pool.query("alter table answers add column if not exists accuracy numeric");
+  await pool.query("alter table answers add column if not exists result jsonb");
   await pool.query(`
     do $$
     begin
@@ -120,6 +135,18 @@ async function ensureSchema(pool) {
           foreign key (session_id) references practice_sessions(id) on delete cascade;
       end if;
     end $$;
+  `);
+  await pool.query(`
+    create table if not exists mistakes (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid references users(id) on delete cascade,
+      subject_id uuid references subjects(id) on delete cascade,
+      question_id uuid references questions(id) on delete cascade,
+      last_answer_id uuid references answers(id) on delete set null,
+      attempts integer not null default 1,
+      updated_at timestamptz not null default now(),
+      unique(user_id, question_id)
+    )
   `);
   await pool.query(`
     create table if not exists analytics_events (
@@ -562,7 +589,7 @@ export async function createDbStore(databaseUrl) {
               source_chunk_ids,
               document_hash
             )
-            values ($1, $2, $3, $4, $5::jsonb, $6, $7::text[], $8, $9::uuid[], $10)
+            values ($1, $2, $3, $4, $5::jsonb, $6, $7::text[], $8, $9, $10::uuid[], $11)
             returning id
           `,
           [

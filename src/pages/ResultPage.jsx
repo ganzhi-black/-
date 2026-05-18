@@ -60,8 +60,8 @@ function sentenceExcerpt(sourceText, hit, minLength = 180, maxLength = 360) {
 }
 
 function sourceExcerpt(question, result) {
-  const sourceText = normalizeText(result?.sourceText);
-  const evidenceQuote = normalizeText(result?.evidenceQuote);
+  const sourceText = normalizeText(result?.sourceText || question?.sourceText);
+  const evidenceQuote = normalizeText(result?.evidenceQuote || question?.evidenceQuote);
 
   if (evidenceQuote && sourceText) {
     const quoteIndex = sourceText.indexOf(evidenceQuote);
@@ -94,6 +94,7 @@ export default function ResultPage() {
   const navigate = useNavigate();
   const [session, setSession] = useState(null);
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [fullSourceOpen, setFullSourceOpen] = useState(false);
   const [finishing, setFinishing] = useState(false);
 
   useEffect(() => {
@@ -104,6 +105,7 @@ export default function ResultPage() {
   const record = useMemo(() => session?.answers.find((item) => item.questionIndex === index), [session, index]);
   const result = record?.result;
   const excerpt = useMemo(() => sourceExcerpt(record?.question, result), [record, result]);
+  const fullSource = normalizeText(result?.sourceText || record?.question?.sourceText);
 
   async function next() {
     if (index >= session.questions.length - 1) {
@@ -193,7 +195,19 @@ export default function ResultPage() {
         </button>
         {sourceOpen && (
           <div className="source-body">
-            <p>{excerpt}</p>
+            <p>{excerpt || fullSource || "暂无可展示的原文片段。"}</p>
+            {fullSource.length > excerpt.length && (
+              <>
+                <button className="text-link source-toggle" type="button" onClick={() => setFullSourceOpen((value) => !value)}>
+                  {fullSourceOpen ? "收起完整片段" : "查看完整片段"}
+                </button>
+                {fullSourceOpen && (
+                  <div className="source-full" onWheel={(event) => event.stopPropagation()} onTouchMove={(event) => event.stopPropagation()}>
+                    <p>{fullSource}</p>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </section>

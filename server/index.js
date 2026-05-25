@@ -29,6 +29,17 @@ const TERM_DEFINITION_PATTERNS = [
   /(?:^|\n)#{2,4}\s*[\u4e00-\u9fffA-Za-z《》“”"·]{2,24}\s*\n\s*(?:是|指|即|又称|所谓|指的是)\S{8,}/m,
 ];
 
+const CLEAN_QUESTION_QUERY = "\u91cd\u70b9 \u8003\u70b9 \u9ad8\u9891\u8003\u70b9 \u9898\u76ee \u8bd5\u9898 \u7b80\u7b54\u9898 \u8bba\u8ff0\u9898 \u540d\u8bcd\u89e3\u91ca \u586b\u7a7a\u9898 \u9009\u62e9\u9898";
+const CLEAN_KEY_POINT_PATTERN = /\u91cd\u70b9|\u91cd\u9ede|\u9ad8\u9891|\u9ad8\u983b|\u5fc5\u80cc|\u5fc5\u8003|\u8003\u70b9|\u8003\u9ede|\u6838\u5fc3|\u91cd\u8981|\u638c\u63e1|\u719f\u6089|\u6ce8\u610f/g;
+const CLEAN_EXISTING_QUESTION_PATTERN = /\u6a21\u62df\u8bd5\u9898|\u6a21\u64ec\u8a66\u984c|\u7ec3\u4e60\u9898|\u7df4\u7fd2\u984c|\u586b\u7a7a\u9898|\u9078\u64c7\u984c|\u9009\u62e9\u9898|\u7b80\u7b54\u9898|\u7c21\u7b54\u984c|\u8bba\u8ff0\u9898|\u8ad6\u8ff0\u984c|\u540d\u8bcd\u89e3\u91ca|\u540d\u8a5e\u89e3\u91cb|\u95ee\u7b54\u9898|\u554f\u7b54\u984c|\u4e00\u3001|\u4e8c\u3001|\u4e09\u3001|\d+[\u3001.\uff0e]/g;
+const CLEAN_TERM_QUESTION_PATTERN = /\u540d\u8bcd\u89e3\u91ca|\u540d\u8a5e\u89e3\u91cb|\u89e3\u91ca\u4e0b\u5217\u540d\u8bcd|\u89e3\u91cb\u4e0b\u5217\u540d\u8a5e|\u540d\u8bcd\u91ca\u4e49|\u540d\u8a5e\u91cb\u7fa9/g;
+const CLEAN_TERM_DEFINITION_PATTERNS = [
+  /\*\*[^*\n]{2,30}\*\*\s*[\uff1a:]\s*[\s\S]{12,}/,
+  /(?:^|\n)\s*(?:\d+[\u3001.\uff0e]\s*)?[\u4e00-\u9fffA-Za-z\u300a\u300b\u201c\u201d"\u00b7]{2,30}\s*[\uff1a:]\s*[\u4e00-\u9fff][^\u3002\n]{8,}/m,
+  /(?:^|\n)\s*[\u4e00-\u9fffA-Za-z\u300a\u300b\u201c\u201d"\u00b7]{2,24}\s*\n\s*(?:\u662f|\u6307|\u5373|\u53c8\u79f0|\u6240\u8c13|\u6307\u7684\u662f)\S{8,}/m,
+  /(?:^|\n)#{2,4}\s*[\u4e00-\u9fffA-Za-z\u300a\u300b\u201c\u201d"\u00b7]{2,24}\s*\n\s*(?:\u662f|\u6307|\u5373|\u53c8\u79f0|\u6240\u8c13|\u6307\u7684\u662f)\S{8,}/m,
+];
+
 const app = express();
 const uploadLimitMb = Number(process.env.UPLOAD_MAX_MB || 80);
 const upload = multer({
@@ -125,6 +136,18 @@ function configuredAdminEmails() {
 function isAdminEmail(email) {
   const configuredEmails = configuredAdminEmails();
   return configuredEmails.length > 0 && configuredEmails.includes(String(email || "").trim().toLowerCase());
+}
+
+function isTransientBackendError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("connection terminated") ||
+    message.includes("connection reset") ||
+    message.includes("connection timeout") ||
+    message.includes("terminating connection") ||
+    error?.code === "ECONNRESET" ||
+    error?.code === "ETIMEDOUT"
+  );
 }
 
 function publicUser(user) {
@@ -231,10 +254,10 @@ function createContentHash(text) {
 function rankSourcesForPractice(sources) {
   const withRank = sources.map((source, index) => {
     const text = source.text || "";
-    const hasKeyPoint = KEY_POINT_PATTERN.test(text);
-    KEY_POINT_PATTERN.lastIndex = 0;
-    const hasExistingQuestion = EXISTING_QUESTION_PATTERN.test(text);
-    EXISTING_QUESTION_PATTERN.lastIndex = 0;
+    const hasKeyPoint = CLEAN_KEY_POINT_PATTERN.test(text);
+    CLEAN_KEY_POINT_PATTERN.lastIndex = 0;
+    const hasExistingQuestion = CLEAN_EXISTING_QUESTION_PATTERN.test(text);
+    CLEAN_EXISTING_QUESTION_PATTERN.lastIndex = 0;
     return {
       source,
       index,
@@ -248,13 +271,13 @@ function rankSourcesForPractice(sources) {
 }
 
 function hasExplicitTermQuestion(text) {
-  const matched = TERM_QUESTION_PATTERN.test(text || "");
-  TERM_QUESTION_PATTERN.lastIndex = 0;
+  const matched = CLEAN_TERM_QUESTION_PATTERN.test(text || "");
+  CLEAN_TERM_QUESTION_PATTERN.lastIndex = 0;
   return matched;
 }
 
 function hasImplicitTermDefinition(text) {
-  return TERM_DEFINITION_PATTERNS.some((pattern) => pattern.test(text || ""));
+  return CLEAN_TERM_DEFINITION_PATTERNS.some((pattern) => pattern.test(text || ""));
 }
 
 function hasTermMaterial(text) {
@@ -267,7 +290,7 @@ async function getPracticeSources({ visitorId, subjectId, amount, types }) {
   const poolSize = Math.max(120, amount * 20);
   const chunkPool = store.listChunks
     ? await store.listChunks({ visitorId, subjectId, limit: poolSize })
-    : await store.searchChunks({ visitorId, subjectId, queryEmbedding: (await embedTexts([QUESTION_QUERY]))[0], limit: poolSize });
+    : await store.searchChunks({ visitorId, subjectId, queryEmbedding: (await embedTexts([CLEAN_QUESTION_QUERY]))[0], limit: poolSize });
 
   const wantsTerm = types.includes("term");
   if (wantsTerm) {
@@ -590,12 +613,50 @@ app.post("/api/sessions", async (req, res, next) => {
   }
 });
 
+app.post("/api/sessions/retry", async (req, res, next) => {
+  try {
+    const subjectId = String(req.body?.subjectId || "").trim();
+    const questionIds = Array.isArray(req.body?.questionIds) ? req.body.questionIds.map((id) => String(id).trim()).filter(Boolean) : [];
+    const mode = String(req.body?.mode || "strict");
+
+    if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
+    if (!questionIds.length) return res.status(400).json({ error: "questionIds are required." });
+    if (!store.getQuestionsByIds) return res.status(501).json({ error: "Retry sessions are not available." });
+
+    const questions = await store.getQuestionsByIds({ visitorId: req.visitorId, subjectId, questionIds });
+    if (!questions.length) return res.status(404).json({ error: "Retry questions not found." });
+
+    const session = createSessionPayload({ subjectId, mode, questions });
+    session.retryMistakeIds = questionIds;
+    if (store.createPracticeSession) {
+      await store.createPracticeSession({ visitorId: req.visitorId, session });
+    }
+    res.status(201).json(session);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/sessions/:sessionId", async (req, res, next) => {
   try {
     if (!store.getPracticeSession) return res.status(404).json({ error: "Session not found." });
     const session = await store.getPracticeSession({ visitorId: req.visitorId, sessionId: req.params.sessionId });
     if (!session) return res.status(404).json({ error: "Session not found." });
     res.json(session);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/sessions/:sessionId/answers/:questionId", async (req, res, next) => {
+  try {
+    if (!store.deleteSessionAnswer) return res.status(404).json({ error: "Answer not found." });
+    await store.deleteSessionAnswer({
+      visitorId: req.visitorId,
+      sessionId: req.params.sessionId,
+      questionId: req.params.questionId,
+    });
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -620,13 +681,15 @@ app.post("/api/answers/grade", async (req, res, next) => {
 
     let savedAnswer = null;
     if (sessionId && store.saveAnswer) {
-      savedAnswer = await store.saveAnswer({
-        visitorId: req.visitorId,
-        sessionId,
-        question,
-        answer,
-        result,
-      });
+      void store
+        .saveAnswer({
+          visitorId: req.visitorId,
+          sessionId,
+          question,
+          answer,
+          result,
+        })
+        .catch((error) => console.warn("[grade] background answer save failed:", error.message));
     }
     const savedAt = performance.now();
 
@@ -729,6 +792,11 @@ app.use((error, req, res, next) => {
   if (error?.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({
       error: `File is too large. Please upload a file smaller than ${uploadLimitMb} MB.`,
+    });
+  }
+  if (isTransientBackendError(error)) {
+    return res.status(503).json({
+      error: "服务连接临时中断，请再试一次。",
     });
   }
   res.status(500).json({

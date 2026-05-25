@@ -1,12 +1,16 @@
-import { AlertCircle, ArrowRight, Clock3, History, UploadCloud } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, Clock3, FileQuestion, History, SlidersHorizontal, UploadCloud } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import { api, track } from "../services/api.js";
 
 const acceptedTypes = [".pdf", ".doc", ".docx", ".txt", ".md"];
-const defaultQuestionTypes = ["single", "short", "essay"];
-const defaultQuestionAmount = 6;
+const typeOptions = [
+  { id: "single", label: "单选题", desc: "适合快速检查概念、定义和关键事实。" },
+  { id: "term", label: "名词解释", desc: "适合背诵核心概念和关键词。" },
+  { id: "short", label: "简答题", desc: "适合训练 200-400 字的要点作答。" },
+  { id: "essay", label: "论述题", desc: "适合训练更完整的分析和展开。" },
+];
 
 export default function UploadPage() {
   const navigate = useNavigate();
@@ -15,6 +19,8 @@ export default function UploadPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [dashboard, setDashboard] = useState(null);
+  const [types, setTypes] = useState(["single", "short", "essay"]);
+  const [amount, setAmount] = useState(6);
 
   const subjectCount = dashboard?.subjects?.length || 0;
 
@@ -38,11 +44,15 @@ export default function UploadPage() {
       return;
     }
     if (lower.endsWith(".pdf") && nextFile.size < 8 * 1024) {
-      setError("疑似扫描版 PDF，mock 阶段暂不支持无文本层资料。");
+      setError("疑似扫描版 PDF，暂不支持无文本层资料。");
       return;
     }
     setFile(nextFile);
     setName((current) => current || nextFile.name.replace(/\.(pdf|doc|docx|txt|md)$/i, ""));
+  }
+
+  function toggleType(type) {
+    setTypes((current) => (current.includes(type) ? current.filter((item) => item !== type) : [...current, type]));
   }
 
   async function submit(event) {
@@ -63,8 +73,8 @@ export default function UploadPage() {
       const subject = await api.createSubject({ name: name.trim().slice(0, 20), file });
       const session = await api.createSession({
         subjectId: subject.id,
-        types: defaultQuestionTypes,
-        amount: defaultQuestionAmount,
+        types: types.length ? types : ["single"],
+        amount: Math.min(50, Math.max(1, Number(amount) || 1)),
         mode: "relaxed",
       });
       navigate(`/quiz/${session.id}`);
@@ -85,7 +95,7 @@ export default function UploadPage() {
         <section className="page-title">
           <p className="eyebrow muted">新建科目</p>
           <h1>上传复习资料</h1>
-          <p>支持 PDF、Word，上限 10 MB。当前为 mock 阶段，文件不会上传到真实服务器。</p>
+          <p>支持 PDF、Word，上限 10 MB。</p>
         </section>
 
         <label
@@ -106,6 +116,33 @@ export default function UploadPage() {
           <span>科目名称</span>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：马克思主义基本原理" maxLength={20} disabled={loading} />
         </label>
+
+        <section className="setting-card">
+          <div className="setting-title">
+            <FileQuestion size={20} />
+            <h2>选择题型</h2>
+          </div>
+          <div className="option-grid">
+            {typeOptions.map((item) => (
+              <button key={item.id} type="button" className={`choice-card ${types.includes(item.id) ? "selected" : ""}`} onClick={() => toggleType(item.id)} disabled={loading}>
+                <span className="check-dot">{types.includes(item.id) ? <Check size={14} /> : null}</span>
+                <strong>{item.label}</strong>
+                <small>{item.desc}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="setting-card">
+          <div className="setting-title">
+            <SlidersHorizontal size={20} />
+            <h2>题目数量</h2>
+          </div>
+          <label className="field compact-field">
+            <span>本次生成题数</span>
+            <input type="number" min="1" max="50" value={amount} onChange={(event) => setAmount(event.target.value)} disabled={loading} />
+          </label>
+        </section>
 
         {error && (
           <div className="notice error">

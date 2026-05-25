@@ -423,6 +423,14 @@ a {
   gap: 10px;
 }
 
+.mistake-actions .secondary-button,
+.mistake-actions .text-link {
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 18px !important;
+  text-align: center;
+}
+
 .primary-button,
 .secondary-button,
 .ghost-button,

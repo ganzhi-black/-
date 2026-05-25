@@ -73,6 +73,19 @@ export default function MistakesPage() {
     }
   }
 
+  async function deleteSubjectMistakes(group) {
+    if (!window.confirm(`确定删除「${repairText(group.subject.name)}」下的 ${group.mistakes.length} 道错题吗？`)) return;
+    const nextDeletingId = `subject:${group.subject.id}`;
+    setDeletingId(nextDeletingId);
+    try {
+      await Promise.all(group.mistakes.map((mistake) => api.deleteMistake(mistake.id)));
+      const removedIds = new Set(group.mistakes.map((mistake) => mistake.id));
+      setMistakes((current) => (current || []).filter((mistake) => !removedIds.has(mistake.id)));
+    } finally {
+      setDeletingId("");
+    }
+  }
+
   if (!mistakes || !dashboard) return <div className="skeleton-page" />;
 
   if (!subjectId) {
@@ -88,22 +101,32 @@ export default function MistakesPage() {
         ) : (
           <div className="subject-grid mistake-subject-grid">
             {groups.map((group) => (
-              <Link className="subject-card mistake-subject-card" key={group.subject.id} to={`/mistakes/${group.subject.id}`}>
-                <div className="subject-icon">
-                  <LibraryBig size={22} />
-                </div>
-                <div>
-                  <h3>{group.subject.name}</h3>
-                  <p>{group.mistakes.length} 道错题待重做</p>
-                </div>
-                <div className="subject-meta">
-                  <span>
-                    <BookOpen size={15} />
-                    {repairText(group.subject.sourceFileName)}
-                  </span>
-                  <span>{group.latest ? cnDateTime(group.latest) : "暂无时间"}</span>
-                </div>
-              </Link>
+              <div className="subject-card mistake-subject-card" key={group.subject.id}>
+                <Link className="subject-card-link" to={`/mistakes/${group.subject.id}`}>
+                  <div className="subject-icon">
+                    <LibraryBig size={22} />
+                  </div>
+                  <div>
+                    <h3>{group.subject.name}</h3>
+                    <p>{group.mistakes.length} 道错题待重做</p>
+                  </div>
+                  <div className="subject-meta">
+                    <span>
+                      <BookOpen size={15} />
+                      {repairText(group.subject.sourceFileName)}
+                    </span>
+                    <span>{group.latest ? cnDateTime(group.latest) : "暂无时间"}</span>
+                  </div>
+                </Link>
+                <LoadingButton
+                  className="subject-delete-button"
+                  loading={deletingId === `subject:${group.subject.id}`}
+                  onClick={() => deleteSubjectMistakes(group)}
+                >
+                  <Trash2 size={16} />
+                  删除
+                </LoadingButton>
+              </div>
             ))}
           </div>
         )}
@@ -152,15 +175,12 @@ export default function MistakesPage() {
                 </div>
                 <div className="mistake-actions">
                   <LoadingButton className="secondary-button" loading={loadingId === item.id} onClick={() => retry([item])}>
-                    <RotateCcw size={17} />
                     重做
                   </LoadingButton>
                   <Link className="text-link" to={`/subjects/${item.subjectId}/settings`}>
                     回到练习设置
-                    <ArrowRight size={16} />
                   </Link>
                   <LoadingButton className="text-link danger-link" loading={deletingId === item.id} onClick={() => deleteMistake(item)}>
-                    <Trash2 size={16} />
                     删除
                   </LoadingButton>
                 </div>

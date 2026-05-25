@@ -1,5 +1,6 @@
 const TARGET_CHUNK_SIZE = 800;
 const MIN_CHUNK_SIZE = 300;
+const QUESTION_BLOCK_SIZE = 1800;
 
 function cleanText(text) {
   return String(text || "")
@@ -41,9 +42,52 @@ function splitParagraphs(text) {
     .filter(Boolean);
 }
 
+function stripMarkdownMarker(line) {
+  return String(line || "")
+    .replace(/^ {0,3}#{1,6}\s+/, "")
+    .replace(/^\s*>+\s*/, "")
+    .trim();
+}
+
+function isQuestionStartLine(line) {
+  const text = stripMarkdownMarker(line);
+  if (!text || compactLength(text) > 140) return false;
+
+  const numbered = /^(?:\d{1,3}[\u3001\uff0e.)．、]|\(\d{1,3}\)|\uff08\d{1,3}\uff09|[一二三四五六七八九十]{1,4}[\u3001\uff0e.)．、]|\([一二三四五六七八九十]{1,4}\)|\uff08[一二三四五六七八九十]{1,4}\uff09)\s*/.test(text);
+  const hasQuestionType = /(?:简答题|论述题|名词解释|选择题|填空题|默写题|判断题|问答题)/.test(text);
+  const hasQuestionVerb = /^(?:请)?(?:简述|试述|论述|分析|说明|概括|谈谈|比较|解释|回答|指出|列举)/.test(text);
+  const endsLikeQuestion = /[？?]\s*$/.test(text);
+
+  return numbered && (hasQuestionType || hasQuestionVerb || endsLikeQuestion);
+}
+
+function splitQuestionBlocks(body) {
+  const lines = cleanText(body).split("\n");
+  const blocks = [];
+  let current = [];
+
+  function flush() {
+    const block = current.join("\n").trim();
+    if (block) blocks.push(block);
+    current = [];
+  }
+
+  for (const line of lines) {
+    if (isQuestionStartLine(line) && current.some((item) => item.trim())) {
+      flush();
+    }
+    current.push(line);
+  }
+
+  flush();
+  return blocks.length > 1 ? blocks : [];
+}
+
 function splitSentences(text) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalized) return [];
+  const cleanMatches = normalized.match(/[^\u3002\uff01\uff1f\uff1b.!?;]+[\u3002\uff01\uff1f\uff1b.!?;]?/g)?.map((item) => item.trim()).filter(Boolean);
+  if (cleanMatches?.length) return cleanMatches;
   return normalized.match(/[^。！？；.!?;]+[。！？；.!?;]?/g)?.map((item) => item.trim()).filter(Boolean) || [normalized];
 }
 
@@ -72,6 +116,17 @@ function splitOversizedText(text, maxSize = TARGET_CHUNK_SIZE) {
 }
 
 function splitBodyUnderPrefix(prefix, body, maxSize = TARGET_CHUNK_SIZE) {
+  const questionBlocks = splitQuestionBlocks(body);
+  if (questionBlocks.length) {
+    return questionBlocks.flatMap((block) => {
+      const questionMaxSize = Math.max(maxSize, QUESTION_BLOCK_SIZE);
+      const candidate = joinParts([prefix, block]);
+      return compactLength(candidate) <= questionMaxSize
+        ? [candidate]
+        : splitBodyUnderPrefix(prefix, block, questionMaxSize);
+    });
+  }
+
   const paragraphs = splitParagraphs(body);
   if (!paragraphs.length) return [prefix].filter(Boolean);
 

@@ -8,6 +8,12 @@ function normalizeVisitorId(visitorId) {
   return String(visitorId || "anonymous-public").replace(/[^a-zA-Z0-9:_-]/g, "").slice(0, 80) || "anonymous-public";
 }
 
+function firstUnansweredIndex(questions, sessionAnswers) {
+  const answeredIndexes = new Set(sessionAnswers.map((answer) => answer.questionIndex));
+  const nextIndex = questions.findIndex((_, index) => !answeredIndexes.has(index));
+  return nextIndex >= 0 ? nextIndex : Math.max(0, questions.length - 1);
+}
+
 export function createMemoryStore() {
   const users = [];
   const authSessions = [];
@@ -209,6 +215,14 @@ export function createMemoryStore() {
         .reverse();
     },
 
+    getQuestionsByIds({ visitorId, subjectId, questionIds }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const questionIdSet = new Set(questionIds || []);
+      return savedQuestions
+        .filter((question) => question.visitorId === ownerId && question.subjectId === subjectId && questionIdSet.has(question.id))
+        .sort((left, right) => questionIds.indexOf(left.id) - questionIds.indexOf(right.id));
+    },
+
     createPracticeSession({ visitorId, session }) {
       practiceSessions.push({
         ...session,
@@ -228,19 +242,26 @@ export function createMemoryStore() {
       return {
         ...session,
         answers: sessionAnswers,
-        currentIndex: Math.min(sessionAnswers.length, Math.max(0, session.questions.length - 1)),
+        currentIndex: firstUnansweredIndex(session.questions, sessionAnswers),
       };
     },
 
     saveAnswer({ visitorId, sessionId, question, answer, result }) {
       const ownerId = normalizeVisitorId(visitorId);
+      for (let index = answers.length - 1; index >= 0; index -= 1) {
+        if (answers[index].visitorId === ownerId && answers[index].sessionId === sessionId && answers[index].questionId === question.id) {
+          answers.splice(index, 1);
+        }
+      }
+      const session = practiceSessions.find((item) => item.visitorId === ownerId && item.id === sessionId);
+      const questionIndex = session?.questions?.findIndex((item) => item.id === question.id) ?? 0;
       const record = {
         id: uid("ans"),
         visitorId: ownerId,
         sessionId,
         questionId: question.id,
         subjectId: question.subjectId,
-        questionIndex: 0,
+        questionIndex: questionIndex >= 0 ? questionIndex : 0,
         question,
         userAnswer: answer,
         result,
@@ -260,6 +281,18 @@ export function createMemoryStore() {
       }
 
       return { id: record.id, createdAt: record.createdAt };
+    },
+
+    deleteSessionAnswer({ visitorId, sessionId, questionId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      let deleted = false;
+      for (let index = answers.length - 1; index >= 0; index -= 1) {
+        if (answers[index].visitorId === ownerId && answers[index].sessionId === sessionId && answers[index].questionId === questionId) {
+          answers.splice(index, 1);
+          deleted = true;
+        }
+      }
+      return deleted;
     },
 
     finishPracticeSession({ visitorId, sessionId, summary }) {

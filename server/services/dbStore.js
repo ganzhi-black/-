@@ -8,6 +8,30 @@ function toVectorSql(vector) {
   return `[${vector.join(",")}]`;
 }
 
+function isTransientConnectionError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("connection terminated") ||
+    message.includes("connection reset") ||
+    message.includes("connection timeout") ||
+    message.includes("terminating connection") ||
+    error?.code === "ECONNRESET" ||
+    error?.code === "ETIMEDOUT"
+  );
+}
+
+async function queryWithRetry(pool, sql, params = [], retries = 1) {
+  try {
+    return await pool.query(sql, params);
+  } catch (error) {
+    if (retries > 0 && isTransientConnectionError(error)) {
+      console.warn("Database connection was interrupted; retrying query once.", error.message);
+      return queryWithRetry(pool, sql, params, retries - 1);
+    }
+    throw error;
+  }
+}
+
 function toSubject(row) {
   return {
     id: row.id,
@@ -48,6 +72,12 @@ function toChunk(row) {
 
 function normalizeVisitorId(visitorId) {
   return String(visitorId || DEFAULT_VISITOR_ID).replace(/[^a-zA-Z0-9:_-]/g, "").slice(0, 80) || DEFAULT_VISITOR_ID;
+}
+
+function firstUnansweredIndex(questions, answers) {
+  const answeredIndexes = new Set(answers.map((answer) => answer.questionIndex));
+  const nextIndex = questions.findIndex((_, index) => !answeredIndexes.has(index));
+  return nextIndex >= 0 ? nextIndex : Math.max(0, questions.length - 1);
 }
 
 async function ensureVisitorUser(pool, visitorId) {
@@ -177,9 +207,21 @@ export async function createDbStore(databaseUrl) {
   const pool = new pg.Pool({
     connectionString: databaseUrl,
     ssl: databaseUrl.includes("supabase.com") ? { rejectUnauthorized: false } : undefined,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+    keepAlive: true,
+  });
+
+  pool.on("error", (error) => {
+    console.warn("Idle database connection error:", error.message);
   });
 
   await ensureSchema(pool);
+
+  function isUuid(value) {
+    return UUID_PATTERN.test(String(value || ""));
+  }
 
   async function getUserId(visitorId) {
     return ensureVisitorUser(pool, visitorId);
@@ -237,7 +279,8 @@ export async function createDbStore(databaseUrl) {
     },
 
     async getAuthSession(tokenHash) {
-      const result = await pool.query(
+      const result = await queryWithRetry(
+        pool,
         `
           select
             s.id,
@@ -311,6 +354,7 @@ export async function createDbStore(databaseUrl) {
     },
 
     async getSubject({ visitorId, subjectId }) {
+      if (!isUuid(subjectId)) return null;
       const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
@@ -341,6 +385,7 @@ export async function createDbStore(databaseUrl) {
     },
 
     async deleteSubject({ visitorId, subjectId }) {
+      if (!isUuid(subjectId)) return false;
       const userId = await getUserId(visitorId);
       const result = await pool.query("delete from subjects where user_id = $1 and id = $2", [userId, subjectId]);
       return result.rowCount > 0;
@@ -368,6 +413,7 @@ export async function createDbStore(databaseUrl) {
     },
 
     async getDocumentHashesForSubject({ visitorId, subjectId }) {
+      if (!isUuid(subjectId)) return [];
       const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
@@ -454,6 +500,7 @@ export async function createDbStore(databaseUrl) {
     },
 
     async getRecentQuestions({ visitorId, subjectId, types, limit = 30 }) {
+      if (!isUuid(subjectId)) return [];
       const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
@@ -469,9 +516,17 @@ export async function createDbStore(databaseUrl) {
             q.evidence_quote,
             q.source_chunk_ids,
             coalesce((
-              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
-              from document_chunks dc
-              where dc.id = any(q.source_chunk_ids)
+              select string_agg(expanded.chunk_text, E'\n\n' order by expanded.document_id, expanded.chunk_index)
+              from (
+                select distinct dc.document_id, dc.chunk_index, dc.chunk_text
+                from document_chunks selected
+                join document_chunks dc
+                  on dc.user_id = selected.user_id
+                  and dc.subject_id = selected.subject_id
+                  and dc.document_id = selected.document_id
+                  and dc.chunk_index between selected.chunk_index - 1 and selected.chunk_index + 1
+                where selected.id = any(q.source_chunk_ids)
+              ) expanded
             ), '') as source_text,
             q.created_at
           from questions q
@@ -500,7 +555,64 @@ export async function createDbStore(databaseUrl) {
       }));
     },
 
+    async getQuestionsByIds({ visitorId, subjectId, questionIds }) {
+      if (!isUuid(subjectId)) return [];
+      const userId = await getUserId(visitorId);
+      if (!questionIds?.length) return [];
+      const result = await pool.query(
+        `
+          select
+            q.id,
+            q.subject_id,
+            q.type,
+            q.title,
+            q.options,
+            q.correct_answer,
+            q.key_points,
+            q.explanation,
+            q.evidence_quote,
+            q.source_chunk_ids,
+            coalesce((
+              select string_agg(expanded.chunk_text, E'\n\n' order by expanded.document_id, expanded.chunk_index)
+              from (
+                select distinct dc.document_id, dc.chunk_index, dc.chunk_text
+                from document_chunks selected
+                join document_chunks dc
+                  on dc.user_id = selected.user_id
+                  and dc.subject_id = selected.subject_id
+                  and dc.document_id = selected.document_id
+                  and dc.chunk_index between selected.chunk_index - 1 and selected.chunk_index + 1
+                where selected.id = any(q.source_chunk_ids)
+              ) expanded
+            ), '') as source_text,
+            q.created_at
+          from questions q
+          where q.user_id = $1
+            and q.subject_id = $2
+            and q.id = any($3::uuid[])
+          order by array_position($3::uuid[], q.id)
+        `,
+        [userId, subjectId, questionIds],
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        subjectId: row.subject_id,
+        type: row.type,
+        title: row.title,
+        options: row.options,
+        correctAnswer: row.correct_answer,
+        explanation: row.explanation,
+        keyPoints: row.key_points || [],
+        evidenceQuote: row.evidence_quote || "",
+        sourceChunkIds: row.source_chunk_ids || [],
+        sourceText: row.source_text || row.evidence_quote || "",
+        sourceLocation: "原文出处",
+      }));
+    },
+
     async searchChunks({ visitorId, subjectId, queryEmbedding, limit = 5 }) {
+      if (!isUuid(subjectId)) return [];
       const userId = await getUserId(visitorId);
       try {
         const result = await pool.query(
@@ -548,6 +660,7 @@ export async function createDbStore(databaseUrl) {
     },
 
     async listChunks({ visitorId, subjectId, limit = 1000 }) {
+      if (!isUuid(subjectId)) return [];
       const userId = await getUserId(visitorId);
       const result = await pool.query(
         `
@@ -571,51 +684,57 @@ export async function createDbStore(databaseUrl) {
     },
 
     async saveQuestions({ visitorId, subjectId, questions, documentHash = null }) {
+      if (!questions.length) return [];
       const userId = await getUserId(visitorId);
-      const saved = [];
-      for (const question of questions) {
-        const result = await pool.query(
-          `
-            insert into questions (
-              user_id,
-              subject_id,
-              type,
-              title,
-              options,
-              correct_answer,
-              key_points,
-              explanation,
-              evidence_quote,
-              source_chunk_ids,
-              document_hash
-            )
-            values ($1, $2, $3, $4, $5::jsonb, $6, $7::text[], $8, $9, $10::uuid[], $11)
-            returning id
-          `,
-          [
-            userId,
-            subjectId,
-            question.type,
-            question.title,
-            question.options ? JSON.stringify(question.options) : null,
-            question.correctAnswer,
-            Array.isArray(question.keyPoints) ? question.keyPoints : [],
-            question.explanation,
-            question.evidenceQuote || "",
-            question.sourceChunkIds,
-            documentHash,
-          ],
-        );
-        saved.push({
-          ...question,
-          id: result.rows[0].id,
+
+      const columns = [
+        "user_id", "subject_id", "type", "title", "options",
+        "correct_answer", "key_points", "explanation", "evidence_quote",
+        "source_chunk_ids", "document_hash",
+      ];
+      const columnCount = columns.length;
+      const castByIndex = { 4: "::jsonb", 6: "::text[]", 9: "::uuid[]" };
+      const params = [];
+      const rowPlaceholders = questions.map((question, index) => {
+        const offset = index * columnCount;
+        params.push(
+          userId,
           subjectId,
+          question.type,
+          question.title,
+          question.options ? JSON.stringify(question.options) : null,
+          question.correctAnswer,
+          Array.isArray(question.keyPoints) ? question.keyPoints : [],
+          question.explanation,
+          question.evidenceQuote || "",
+          question.sourceChunkIds,
+          documentHash,
+        );
+        const placeholders = Array.from({ length: columnCount }, (_, col) => {
+          const p = `$${offset + col + 1}`;
+          return castByIndex[col] ? `${p}${castByIndex[col]}` : p;
         });
-      }
-      return saved;
+        return `(${placeholders.join(", ")})`;
+      });
+
+      const result = await pool.query(
+        `
+          insert into questions (${columns.join(", ")})
+          values ${rowPlaceholders.join(", ")}
+          returning id
+        `,
+        params,
+      );
+
+      return questions.map((question, index) => ({
+        ...question,
+        id: result.rows[index].id,
+        subjectId,
+      }));
     },
 
     async createPracticeSession({ visitorId, session }) {
+      if (!isUuid(session.subjectId)) return session;
       const userId = await getUserId(visitorId);
       await pool.query(
         `
@@ -663,9 +782,17 @@ export async function createDbStore(databaseUrl) {
             q.evidence_quote,
             q.source_chunk_ids,
             coalesce((
-              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
-              from document_chunks dc
-              where dc.id = any(q.source_chunk_ids)
+              select string_agg(expanded.chunk_text, E'\n\n' order by expanded.document_id, expanded.chunk_index)
+              from (
+                select distinct dc.document_id, dc.chunk_index, dc.chunk_text
+                from document_chunks selected
+                join document_chunks dc
+                  on dc.user_id = selected.user_id
+                  and dc.subject_id = selected.subject_id
+                  and dc.document_id = selected.document_id
+                  and dc.chunk_index between selected.chunk_index - 1 and selected.chunk_index + 1
+                where selected.id = any(q.source_chunk_ids)
+              ) expanded
             ), '') as source_text,
             q.created_at
           from questions q
@@ -729,7 +856,7 @@ export async function createDbStore(databaseUrl) {
         mode: session.mode,
         questions,
         answers,
-        currentIndex: Math.min(answers.length, Math.max(0, questions.length - 1)),
+        currentIndex: firstUnansweredIndex(questions, answers),
         retryMistakeIds: [],
         createdAt: session.started_at,
         completedAt: session.completed_at,
@@ -747,7 +874,9 @@ export async function createDbStore(databaseUrl) {
     },
 
     async saveAnswer({ visitorId, sessionId, question, answer, result }) {
+      if (!isUuid(question.subjectId)) return { id: `ans_local_${Date.now()}`, createdAt: new Date().toISOString() };
       const userId = await getUserId(visitorId);
+      await pool.query("delete from answers where user_id = $1 and session_id = $2 and question_id = $3", [userId, sessionId, question.id]);
       const saved = await pool.query(
         `
           insert into answers (
@@ -798,6 +927,12 @@ export async function createDbStore(databaseUrl) {
       };
     },
 
+    async deleteSessionAnswer({ visitorId, sessionId, questionId }) {
+      const userId = await getUserId(visitorId);
+      const result = await pool.query("delete from answers where user_id = $1 and session_id = $2 and question_id = $3", [userId, sessionId, questionId]);
+      return result.rowCount > 0;
+    },
+
     async finishPracticeSession({ visitorId, sessionId, summary }) {
       const userId = await getUserId(visitorId);
       await pool.query(
@@ -846,9 +981,17 @@ export async function createDbStore(databaseUrl) {
             q.evidence_quote,
             q.source_chunk_ids,
             coalesce((
-              select string_agg(dc.chunk_text, E'\n\n' order by array_position(q.source_chunk_ids, dc.id))
-              from document_chunks dc
-              where dc.id = any(q.source_chunk_ids)
+              select string_agg(expanded.chunk_text, E'\n\n' order by expanded.document_id, expanded.chunk_index)
+              from (
+                select distinct dc.document_id, dc.chunk_index, dc.chunk_text
+                from document_chunks selected
+                join document_chunks dc
+                  on dc.user_id = selected.user_id
+                  and dc.subject_id = selected.subject_id
+                  and dc.document_id = selected.document_id
+                  and dc.chunk_index between selected.chunk_index - 1 and selected.chunk_index + 1
+                where selected.id = any(q.source_chunk_ids)
+              ) expanded
             ), '') as source_text,
             a.user_answer,
             a.result,

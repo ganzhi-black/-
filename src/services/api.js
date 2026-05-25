@@ -6,7 +6,13 @@ const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, 
 const DEFAULT_PRODUCTION_API_BASE_URL = "https://api-production-5b928.up.railway.app";
 const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
 
-export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE_URL : "http://localhost:8787");
+function localApiBaseUrl() {
+  if (typeof window === "undefined") return "http://localhost:8787";
+  const hostname = window.location.hostname || "localhost";
+  return `http://${hostname}:8787`;
+}
+
+export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE_URL : localApiBaseUrl());
 const configuredRealtimeAsrUrl = import.meta.env.VITE_REALTIME_ASR_URL?.trim();
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
 
@@ -54,10 +60,19 @@ async function request(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+    throw new Error(readableApiError(payload.error || `Request failed: ${response.status}`));
   }
 
   return payload;
+}
+
+function readableApiError(message) {
+  const text = String(message || "");
+  const lower = text.toLowerCase();
+  if (lower.includes("connection terminated") || lower.includes("connection reset") || lower.includes("connection timeout")) {
+    return "服务连接临时中断，请再点一次提交。";
+  }
+  return text;
 }
 
 export function track(eventName, properties = {}) {
@@ -126,6 +141,33 @@ function normalizeSession(session) {
     skippedQuestionIndexes: Array.isArray(session?.skippedQuestionIndexes) ? session.skippedQuestionIndexes : [],
     currentIndex: Number.isFinite(Number(session?.currentIndex)) ? Number(session.currentIndex) : 0,
   };
+}
+
+function cachedSession(sessionId) {
+  const session = loadState().sessions.find((item) => item.id === sessionId);
+  return session ? normalizeSession(session) : null;
+}
+
+function storeSession(session, { preserveLocalProgress = false } = {}) {
+  const normalized = normalizeSession(session);
+  updateState((draft) => {
+    const index = draft.sessions.findIndex((item) => item.id === normalized.id);
+    if (index >= 0) {
+      const current = draft.sessions[index];
+      const currentAnswers = Array.isArray(current.answers) ? current.answers : [];
+      const incomingAnswers = Array.isArray(normalized.answers) ? normalized.answers : [];
+      draft.sessions[index] = {
+        ...current,
+        ...normalized,
+        answers: incomingAnswers.length >= currentAnswers.length ? incomingAnswers : currentAnswers,
+        currentIndex: preserveLocalProgress ? current.currentIndex : normalized.currentIndex,
+        skippedQuestionIndexes: preserveLocalProgress ? current.skippedQuestionIndexes || [] : normalized.skippedQuestionIndexes,
+      };
+    } else {
+      draft.sessions.unshift(normalized);
+    }
+  });
+  return normalized;
 }
 
 function countGeneratedQuestions(state, subjectId) {
@@ -332,7 +374,20 @@ export const api = {
         subjectId,
         amount: retryQuestions.length,
       });
-      return mockApi.createSession({ subjectId, types, amount, mode, retryQuestions });
+      const session = await request("/api/sessions/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subjectId,
+          questionIds: retryQuestions.map((item) => item.question?.id).filter(Boolean),
+          mode,
+        }),
+      });
+      const normalizedSession = normalizeSession(session);
+      updateState((draft) => {
+        draft.sessions.unshift(normalizedSession);
+      });
+      return normalizedSession;
     }
 
     try {
@@ -363,15 +418,17 @@ export const api = {
     }
   },
 
-  async getSession(sessionId) {
+  async getSession(sessionId, options = {}) {
+    const cached = cachedSession(sessionId);
+    if (cached && !options.forceRefresh) {
+      void request(`/api/sessions/${sessionId}`)
+        .then((session) => storeSession(session, { preserveLocalProgress: true }))
+        .catch((error) => console.warn("Session background refresh failed:", error));
+      return cached;
+    }
+
     try {
-      const session = normalizeSession(await request(`/api/sessions/${sessionId}`));
-      updateState((draft) => {
-        const index = draft.sessions.findIndex((item) => item.id === session.id);
-        if (index >= 0) draft.sessions[index] = { ...draft.sessions[index], ...session };
-        else draft.sessions.unshift(session);
-      });
-      return session;
+      return storeSession(await request(`/api/sessions/${sessionId}`), { preserveLocalProgress: Boolean(options.preserveLocalProgress) });
     } catch (error) {
       console.warn("Session endpoint failed:", error);
       if (!MOCK_FALLBACK_ENABLED) throw error;
@@ -388,9 +445,6 @@ export const api = {
       return mockApi.submitAnswer({ sessionId, questionIndex, answer });
     }
     const session = normalizeSession(rawSession);
-    if (session.retryMistakeIds.length > 0) {
-      return mockApi.submitAnswer({ sessionId, questionIndex, answer });
-    }
 
     const question = session.questions[questionIndex];
     if (!question) throw new Error("没有找到当前题目，请返回题目页重新进入。");
@@ -441,6 +495,18 @@ export const api = {
     return answerRecord;
   },
 
+  async deleteSessionAnswer({ sessionId, questionId }) {
+    updateState((draft) => {
+      const current = draft.sessions.find((item) => item.id === sessionId);
+      if (!current) return;
+      current.answers = (current.answers || []).filter((item) => item.questionId !== questionId);
+      draft.answers = (draft.answers || []).filter((item) => !(item.sessionId === sessionId && item.questionId === questionId));
+    });
+    void request(`/api/sessions/${sessionId}/answers/${questionId}`, {
+      method: "DELETE",
+    }).catch((error) => console.warn("Delete answer sync failed:", error));
+  },
+
   async finishSession(sessionId) {
     const state = loadState();
     const session = state.sessions.find((item) => item.id === sessionId);
@@ -464,16 +530,19 @@ export const api = {
       current.completedAt = new Date().toISOString();
       current.summary = summary;
     });
-    await request(`/api/sessions/${sessionId}/finish`, {
+    void request(`/api/sessions/${sessionId}/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(summary),
-    });
-    await track("practice_finished", {
-      sessionId,
-      subjectId: session.subjectId,
-      ...summary,
-    });
+    })
+      .then(() => {
+        track("practice_finished", {
+          sessionId,
+          subjectId: session.subjectId,
+          ...summary,
+        });
+      })
+      .catch((error) => console.warn("Finish session sync failed:", error));
 
     return summary;
   },

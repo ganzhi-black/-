@@ -5,6 +5,8 @@ import { repairText } from "../utils/textRepair.js";
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
 const DEFAULT_PRODUCTION_API_BASE_URL = "https://api-production-5b928.up.railway.app";
 const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
+const DEFAULT_RETRY_COUNT = 2;
+const RETRY_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 522, 523, 524]);
 
 function localApiBaseUrl() {
   if (typeof window === "undefined") return "http://localhost:8787";
@@ -34,7 +36,7 @@ function getVisitorId() {
   }
 }
 
-async function request(path, options = {}) {
+async function requestOnce(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Visitor-Id", getVisitorId());
   const timeoutMs = Number(options.timeoutMs || 0);
@@ -50,29 +52,77 @@ async function request(path, options = {}) {
       signal: controller?.signal || options.signal,
     });
   } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error("批改响应超时，请稍后重试。");
-    }
-    throw new Error("无法连接后端服务，请检查部署环境变量或稍后重试。");
+    const nextError = new Error(
+      error?.name === "AbortError"
+        ? "\u670d\u52a1\u54cd\u5e94\u65f6\u95f4\u8f83\u957f\uff0c\u8bf7\u7a0d\u7b49\u7247\u523b\u3002"
+        : "\u670d\u52a1\u6b63\u5728\u6062\u590d\uff0c\u8bf7\u7a0d\u7b49\u7247\u523b\u3002",
+    );
+    nextError.retryable = error?.name !== "AbortError";
+    throw nextError;
   } finally {
     if (timeout) clearTimeout(timeout);
   }
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(readableApiError(payload.error || `Request failed: ${response.status}`));
+    const error = new Error(readableApiError(payload.error || `Request failed: ${response.status}`));
+    error.status = response.status;
+    error.retryable = RETRY_STATUS_CODES.has(response.status) || isTransientErrorMessage(payload.error);
+    throw error;
   }
 
   return payload;
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientErrorMessage(message) {
+  const lower = String(message || "").toLowerCase();
+  return (
+    lower.includes("connection terminated") ||
+    lower.includes("connection reset") ||
+    lower.includes("connection timeout") ||
+    lower.includes("temporarily unavailable") ||
+    lower.includes("service connection") ||
+    lower.includes("service unavailable") ||
+    lower.includes("econnreset") ||
+    lower.includes("etimedout") ||
+    lower.includes("fetch failed") ||
+    lower.includes("networkerror") ||
+    lower.includes("failed to fetch")
+  );
+}
+
+function retryDelay(attempt) {
+  return 700 + attempt * 900;
+}
+
 function readableApiError(message) {
   const text = String(message || "");
-  const lower = text.toLowerCase();
-  if (lower.includes("connection terminated") || lower.includes("connection reset") || lower.includes("connection timeout")) {
-    return "服务连接临时中断，请再点一次提交。";
+  if (isTransientErrorMessage(text)) {
+    return "\u670d\u52a1\u6b63\u5728\u6062\u590d\uff0c\u8bf7\u7a0d\u7b49\u7247\u523b\u3002";
   }
   return text;
+}
+
+async function request(path, options = {}) {
+  const retries = Number.isFinite(Number(options.retries)) ? Number(options.retries) : DEFAULT_RETRY_COUNT;
+  let lastError;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await requestOnce(path, options);
+    } catch (error) {
+      lastError = error;
+      const retryable = error?.retryable || (!error?.status && !options.timeoutMs) || isTransientErrorMessage(error?.message);
+      if (!retryable || attempt >= retries) break;
+      await wait(retryDelay(attempt));
+    }
+  }
+
+  throw lastError;
 }
 
 export function track(eventName, properties = {}) {
@@ -414,7 +464,8 @@ export const api = {
 
       return normalizedSession;
     } catch (error) {
-      throw new Error(`AI 出题失败：${error.message}`);
+      console.warn("Session creation endpoint failed:", error);
+      throw new Error("\u670d\u52a1\u6b63\u5728\u6062\u590d\uff0c\u8bf7\u7a0d\u7b49\u7247\u523b\u540e\u81ea\u52a8\u91cd\u8bd5\u3002");
     }
   },
 

@@ -43,6 +43,8 @@ const QUESTION_SCHEMA = {
   },
 };
 
+const QUESTION_ITEM_SCHEMA = QUESTION_SCHEMA.properties.questions.items;
+
 const SYSTEM_PROMPT =
   "\u4f60\u662f\u9762\u5411\u671f\u672b\u590d\u4e60\u7684\u51fa\u9898\u8001\u5e08\uff0c\u5fc5\u987b\u4e25\u683c\u6839\u636e\u7528\u6237\u4e0a\u4f20\u7684\u8d44\u6599\u51fa\u9898\uff0c\u4e0d\u8981\u7f16\u9020\u8d44\u6599\u5916\u7684\u77e5\u8bc6\u3002";
 
@@ -50,8 +52,12 @@ const REQUIRED_KEY_POINTS_SENTENCE =
   "\u4ece\u539f\u6587\u4e2d\u63d0\u53d6\u8be5\u9898\u7684\u6240\u6709\u5fc5\u8981\u8981\u70b9\uff0c\u4e0d\u8981\u9057\u6f0f\u3002";
 
 const MAX_QUESTIONS_PER_SESSION = 50;
-const QUESTION_BATCH_SIZE = 8;
-const QUESTION_BATCH_CONCURRENCY = 3;
+const QUESTION_MAX_TOKENS_BY_TYPE = {
+  single: 400,
+  term: 600,
+  short: 600,
+  essay: 800,
+};
 
 const QUESTION_GENERATION_SKILL = `
 # AI 出题 Skill
@@ -536,7 +542,7 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
   ].join("\n");
 
   return [
-    `\u8bf7\u751f\u6210 ${amount} \u9053\u671f\u672b\u590d\u4e60\u9898\uff0c\u9898\u578b\u987a\u5e8f\u4e3a\uff1a${requestedTypes.join("\u3001")}\u3002`,
+    `\u8bf7\u751f\u6210 1 \u9053\u671f\u672b\u590d\u4e60\u9898\uff0c\u9898\u578b\u5c3d\u91cf\u4e3a\uff1a${requestedTypes[0] || "single"}\u3002`,
     "\u53ea\u80fd\u4f7f\u7528\u4e0b\u65b9\u8d44\u6599\u51fa\u9898\uff1b\u4e0d\u8981\u5f15\u5165\u8d44\u6599\u4e2d\u6ca1\u6709\u7684\u77e5\u8bc6\u70b9\u3002",
     REQUIRED_KEY_POINTS_SENTENCE,
     "Priority rules:",
@@ -562,9 +568,9 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
     "\u6bcf\u9053\u9898\u90fd\u5fc5\u987b\u586b\u5199 sourceChunkIndexes\uff0c\u6307\u5411\u6700\u80fd\u652f\u6491\u8be5\u9898\u7684 SOURCE \u7d22\u5f15\u3002",
     "\u6bcf\u9053\u9898\u90fd\u5fc5\u987b\u586b\u5199 evidenceQuote\uff1a\u4ece\u8d44\u6599\u4e2d\u6458\u51fa\u6700\u80fd\u652f\u6491\u7b54\u6848\u7684\u4e00\u5c0f\u6bb5\u539f\u6587\uff0c80 \u5230 220 \u4e2a\u4e2d\u6587\u5b57\u7b26\uff0c\u4e0d\u8981\u6574\u6bb5\u590d\u5236\u3002",
     "evidenceQuote must start from the beginning of a complete sentence and end at a sentence boundary. Do not start with a half sentence.",
-    "\u53ea\u8fd4\u56de JSON\uff0c\u4e0d\u8981\u8fd4\u56de Markdown \u6216\u89e3\u91ca\u6027\u6587\u5b57\u3002",
+    "\u53ea\u8fd4\u56de\u5355\u4e2a JSON \u9898\u76ee\u5bf9\u8c61\uff0c\u4e0d\u8981\u5305\u5728 questions \u6570\u7ec4\u91cc\uff0c\u4e0d\u8981\u8fd4\u56de Markdown \u6216\u89e3\u91ca\u6027\u6587\u5b57\u3002",
     "JSON schema:",
-    JSON.stringify(QUESTION_SCHEMA, null, 2),
+    JSON.stringify(QUESTION_ITEM_SCHEMA, null, 2),
     "\u8d44\u6599\u7247\u6bb5\uff1a",
     sourceText,
   ].join("\n");
@@ -605,7 +611,7 @@ function normalizeQuestion(question, index, sources, requestedType) {
   };
 }
 
-async function callDeepSeek(prompt) {
+async function callDeepSeek(prompt, { maxTokens } = {}) {
   const apiKey = process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("DEEPSEEK_API_KEY is required to generate questions.");
 
@@ -624,7 +630,7 @@ async function callDeepSeek(prompt) {
       ],
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: Number(process.env.DEEPSEEK_MAX_TOKENS || 6000),
+      max_tokens: Number(maxTokens || process.env.DEEPSEEK_MAX_TOKENS || 6000),
     }),
   });
 
@@ -636,7 +642,7 @@ async function callDeepSeek(prompt) {
   return extractDeepSeekOutputText(await response.json());
 }
 
-async function callOpenAi(prompt) {
+async function callOpenAi(prompt, { maxTokens } = {}) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -652,9 +658,10 @@ async function callOpenAi(prompt) {
           type: "json_schema",
           name: "question_generation",
           strict: true,
-          schema: QUESTION_SCHEMA,
+          schema: QUESTION_ITEM_SCHEMA,
         },
       },
+      max_output_tokens: Number(maxTokens || process.env.OPENAI_MAX_OUTPUT_TOKENS || 6000),
     }),
   });
 
@@ -676,28 +683,31 @@ export async function generateQuestionsFromSources({ sources, types, amount, exc
 
   const allRequestedTypes = normalizeTypeList(types, safeAmount);
   const blockedTitles = new Set(excludedQuestions.map((question) => normalizeQuestionTitle(question.title)).filter(Boolean));
-  const batches = [];
-  for (let start = 0; start < safeAmount; start += QUESTION_BATCH_SIZE) {
-    const amount = Math.min(QUESTION_BATCH_SIZE, safeAmount - start);
-    batches.push({
-      start,
-      amount,
-      requestedTypes: allRequestedTypes.slice(start, start + amount),
-      sources: selectBatchSources(sources, start, amount),
-    });
-  }
-
-  let batchResults = [];
-  try {
-    batchResults = await runQuestionBatches({ provider, batches, excludedQuestions });
-  } catch (error) {
-    console.warn(`Model question generation failed; using extractive fallback. ${error.message}`);
-  }
+  const generatedResults = await Promise.all(
+    allRequestedTypes.map((requestedType, index) =>
+      generateSingleQuestion({
+        provider,
+        sources: selectBatchSources(sources, index, 1),
+        requestedType,
+        excludedQuestions,
+        index,
+      }),
+    ),
+  );
 
   const questions = [];
-  for (const question of batchResults.flat()) {
+  const missingTypes = [];
+  for (let index = 0; index < generatedResults.length; index += 1) {
+    const question = generatedResults[index];
+    if (!question) {
+      missingTypes.push(allRequestedTypes[index]);
+      continue;
+    }
     const normalizedTitle = normalizeQuestionTitle(question.title);
-    if (!normalizedTitle || blockedTitles.has(normalizedTitle)) continue;
+    if (!normalizedTitle || blockedTitles.has(normalizedTitle)) {
+      missingTypes.push(allRequestedTypes[index]);
+      continue;
+    }
     blockedTitles.add(normalizedTitle);
     questions.push(question);
   }
@@ -705,7 +715,7 @@ export async function generateQuestionsFromSources({ sources, types, amount, exc
   if (questions.length < safeAmount) {
     const fallbackQuestions = fallbackQuestionsFromSources({
       sources,
-      requestedTypes: allRequestedTypes.slice(questions.length),
+      requestedTypes: missingTypes.length ? missingTypes : allRequestedTypes.slice(questions.length),
       amount: safeAmount - questions.length,
     });
     for (const question of fallbackQuestions) {
@@ -726,85 +736,24 @@ function selectBatchSources(sources, start, amount) {
   return Array.from({ length: windowSize }, (_, index) => sources[(start + index) % sources.length]);
 }
 
-async function runQuestionBatches({ provider, batches, excludedQuestions }) {
-  const results = new Array(batches.length);
-  let nextIndex = 0;
-
-  async function worker() {
-    while (nextIndex < batches.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      const batch = batches[index];
-      results[index] = await generateQuestionBatch({
-        provider,
-        sources: batch.sources,
-        requestedTypes: batch.requestedTypes,
-        amount: batch.amount,
-        excludedQuestions,
-      });
-    }
-  }
-
-  const workerCount = Math.min(QUESTION_BATCH_CONCURRENCY, batches.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
+function maxTokensForQuestionType(type) {
+  return QUESTION_MAX_TOKENS_BY_TYPE[type] || QUESTION_MAX_TOKENS_BY_TYPE.short;
 }
 
-async function generateQuestionBatch({ provider, sources, requestedTypes, amount, excludedQuestions = [], attempt = 0 }) {
-  const prompt = buildPrompt({ sources, requestedTypes, amount, excludedQuestions });
-  let text;
+async function generateSingleQuestion({ provider, sources, requestedType, excludedQuestions = [], index = 0 }) {
+  const prompt = buildPrompt({ sources, requestedTypes: [requestedType], amount: 1, excludedQuestions });
+  const maxTokens = maxTokensForQuestionType(requestedType);
   try {
-    text = provider === "deepseek" ? await callDeepSeek(prompt) : await callOpenAi(prompt);
-  } catch (error) {
-    throw new Error(`${provider} question generation request failed. ${error.message}`);
-  }
-
-  try {
+    const text =
+      provider === "deepseek"
+        ? await callDeepSeek(prompt, { maxTokens })
+        : await callOpenAi(prompt, { maxTokens });
     const parsed = parseJson(text);
-    const questions = (parsed.questions || [])
-      .slice(0, amount)
-      .map((question, index) => normalizeQuestion(question, index, sources, requestedTypes[index]));
-
-    if (!questions.length) {
-      const fallbackQuestions = fallbackQuestionsFromSources({ sources, requestedTypes, amount });
-      if (fallbackQuestions.length) {
-        console.warn("Model returned no questions; using extractive fallback.");
-        return fallbackQuestions;
-      }
-      throw new Error("Model returned no questions.");
-    }
-    return questions;
+    const question = Array.isArray(parsed.questions) ? parsed.questions[0] : parsed;
+    if (!question || typeof question !== "object") throw new Error("Model did not return a question object.");
+    return normalizeQuestion(question, 0, sources, requestedType);
   } catch (error) {
-    if (attempt < 1 && amount > 2) {
-      console.warn(`Question batch JSON parse failed, retrying same batch. ${error.message}`);
-      return generateQuestionBatch({ provider, sources, requestedTypes, amount, excludedQuestions, attempt: attempt + 1 });
-    }
-
-    const fallbackQuestions = fallbackQuestionsFromSources({ sources, requestedTypes, amount });
-    if (fallbackQuestions.length) {
-      console.warn(`Question batch fell back to extractive generation. ${error.message}`);
-      return fallbackQuestions;
-    }
-
-    if (amount <= 1) throw error;
-
-    const midpoint = Math.ceil(amount / 2);
-    const [first, second] = await Promise.all([
-      generateQuestionBatch({
-        provider,
-        sources,
-        requestedTypes: requestedTypes.slice(0, midpoint),
-        amount: midpoint,
-        excludedQuestions,
-      }),
-      generateQuestionBatch({
-        provider,
-        sources,
-        requestedTypes: requestedTypes.slice(midpoint),
-        amount: amount - midpoint,
-        excludedQuestions,
-      }),
-    ]);
-    return [...first, ...second];
+    console.warn(`Question ${index + 1} generation skipped. ${error.message}`);
+    return null;
   }
 }

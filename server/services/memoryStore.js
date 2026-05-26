@@ -198,7 +198,7 @@ export function createMemoryStore() {
       const ownerId = normalizeVisitorId(visitorId);
       const saved = questions.map((question) => ({
         ...question,
-        id: uid("q"),
+        id: question.id || uid("q"),
         visitorId: ownerId,
         subjectId,
         documentHash,

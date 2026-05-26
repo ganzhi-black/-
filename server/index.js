@@ -243,6 +243,17 @@ function createSessionPayload({ subjectId, mode, questions }) {
   };
 }
 
+function prepareQuestionsForImmediateReturn({ questions, subjectId, documentHash = null }) {
+  const generatedAt = new Date().toISOString();
+  return questions.map((question) => ({
+    ...question,
+    id: question.id || crypto.randomUUID(),
+    subjectId,
+    documentHash,
+    generatedAt: question.generatedAt || generatedAt,
+  }));
+}
+
 function normalizeForHash(text) {
   return String(text || "").replace(/\s+/g, "").trim();
 }
@@ -343,7 +354,14 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
     excludedQuestions: [...priorQuestions, ...currentSubjectQuestions],
   });
   const generatedAt = performance.now();
-  const savedQuestions = await store.saveQuestions({ visitorId, subjectId, questions, documentHash: documentHashes[0] || null });
+  const savedQuestions = prepareQuestionsForImmediateReturn({
+    questions,
+    subjectId,
+    documentHash: documentHashes[0] || null,
+  });
+  void store
+    .saveQuestions({ visitorId, subjectId, questions: savedQuestions, documentHash: documentHashes[0] || null })
+    .catch((error) => console.error("background save failed:", error));
   const savedAt = performance.now();
   const timings = {
     retrievalMs: Math.round(retrievedAt - startedAt),
@@ -605,7 +623,9 @@ app.post("/api/sessions", async (req, res, next) => {
     const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
     const session = createSessionPayload({ subjectId, mode, questions: result.questions });
     if (store.createPracticeSession) {
-      await store.createPracticeSession({ visitorId: req.visitorId, session });
+      void store
+        .createPracticeSession({ visitorId: req.visitorId, session })
+        .catch((error) => console.error("background save failed:", error));
     }
     res.status(201).json(session);
   } catch (error) {
@@ -629,7 +649,9 @@ app.post("/api/sessions/retry", async (req, res, next) => {
     const session = createSessionPayload({ subjectId, mode, questions });
     session.retryMistakeIds = questionIds;
     if (store.createPracticeSession) {
-      await store.createPracticeSession({ visitorId: req.visitorId, session });
+      void store
+        .createPracticeSession({ visitorId: req.visitorId, session })
+        .catch((error) => console.error("background save failed:", error));
     }
     res.status(201).json(session);
   } catch (error) {
@@ -689,7 +711,7 @@ app.post("/api/answers/grade", async (req, res, next) => {
           answer,
           result,
         })
-        .catch((error) => console.warn("[grade] background answer save failed:", error.message));
+        .catch((error) => console.error("background save failed:", error));
     }
     const savedAt = performance.now();
 

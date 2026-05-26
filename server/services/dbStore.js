@@ -1,4 +1,5 @@
 import pg from "pg";
+import crypto from "node:crypto";
 
 const DEFAULT_VISITOR_ID = "anonymous-public";
 const DEFAULT_CHUNK_INSERT_BATCH_SIZE = 20;
@@ -686,18 +687,23 @@ export async function createDbStore(databaseUrl) {
     async saveQuestions({ visitorId, subjectId, questions, documentHash = null }) {
       if (!questions.length) return [];
       const userId = await getUserId(visitorId);
+      const questionRows = questions.map((question) => ({
+        ...question,
+        id: UUID_PATTERN.test(String(question.id || "")) ? question.id : crypto.randomUUID(),
+      }));
 
       const columns = [
-        "user_id", "subject_id", "type", "title", "options",
+        "id", "user_id", "subject_id", "type", "title", "options",
         "correct_answer", "key_points", "explanation", "evidence_quote",
         "source_chunk_ids", "document_hash",
       ];
       const columnCount = columns.length;
-      const castByIndex = { 4: "::jsonb", 6: "::text[]", 9: "::uuid[]" };
+      const castByIndex = { 5: "::jsonb", 7: "::text[]", 10: "::uuid[]" };
       const params = [];
-      const rowPlaceholders = questions.map((question, index) => {
+      const rowPlaceholders = questionRows.map((question, index) => {
         const offset = index * columnCount;
         params.push(
+          question.id,
           userId,
           subjectId,
           question.type,
@@ -726,7 +732,7 @@ export async function createDbStore(databaseUrl) {
         params,
       );
 
-      return questions.map((question, index) => ({
+      return questionRows.map((question, index) => ({
         ...question,
         id: result.rows[index].id,
         subjectId,
@@ -876,6 +882,40 @@ export async function createDbStore(databaseUrl) {
     async saveAnswer({ visitorId, sessionId, question, answer, result }) {
       if (!isUuid(question.subjectId)) return { id: `ans_local_${Date.now()}`, createdAt: new Date().toISOString() };
       const userId = await getUserId(visitorId);
+      await pool.query(
+        `
+          insert into questions (
+            id,
+            user_id,
+            subject_id,
+            type,
+            title,
+            options,
+            correct_answer,
+            key_points,
+            explanation,
+            evidence_quote,
+            source_chunk_ids,
+            document_hash
+          )
+          values ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::text[], $9, $10, $11::uuid[], $12)
+          on conflict (id) do nothing
+        `,
+        [
+          question.id,
+          userId,
+          question.subjectId,
+          question.type,
+          question.title,
+          question.options ? JSON.stringify(question.options) : null,
+          question.correctAnswer,
+          Array.isArray(question.keyPoints) ? question.keyPoints : [],
+          question.explanation || "",
+          question.evidenceQuote || "",
+          Array.isArray(question.sourceChunkIds) ? question.sourceChunkIds : [],
+          question.documentHash || null,
+        ],
+      );
       await pool.query("delete from answers where user_id = $1 and session_id = $2 and question_id = $3", [userId, sessionId, question.id]);
       const saved = await pool.query(
         `

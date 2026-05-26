@@ -478,6 +478,56 @@ function fallbackQuestionsFromSources({ sources, requestedTypes, amount }) {
   return questions;
 }
 
+function uniqueQuestionTitle(title, usedTitles) {
+  const base = String(title || "").trim() || "资料要点练习";
+  let candidate = base;
+  let counter = 2;
+  while (usedTitles.has(normalizeQuestionTitle(candidate))) {
+    candidate = `${base}（补充练习${counter}）`;
+    counter += 1;
+  }
+  return candidate;
+}
+
+function forcedFallbackQuestionsFromSources({ sources, requestedTypes, amount, usedTitles }) {
+  const questions = [];
+  if (!sources.length || amount <= 0) return questions;
+
+  const attempts = Math.max(sources.length, amount * 3);
+  for (let offset = 0; offset < attempts && questions.length < amount; offset += 1) {
+    const sourceIndex = offset % sources.length;
+    const source = sources[sourceIndex];
+    const requestedType = requestedTypes[questions.length % Math.max(1, requestedTypes.length)] || "short";
+    const titleInfo = fallbackTitleFromSource(source.text, requestedType);
+    const rawPoints = extractKeyPointsFromSource(source.text, titleInfo.rawLine);
+    const type = inferTypeFromText(titleInfo.rawLine || titleInfo.title, requestedType);
+    const keyPoints = cleanKeyPoints({ title: titleInfo.title, type, keyPoints: rawPoints }, rawPoints, source.text);
+    if (!keyPoints.length) continue;
+
+    const title = uniqueQuestionTitle(titleInfo.title, usedTitles);
+    usedTitles.add(normalizeQuestionTitle(title));
+    questions.push(
+      normalizeQuestion(
+        {
+          type,
+          title,
+          options: type === "single" ? fallbackOptionsFromPoints(keyPoints) : null,
+          correctAnswer: type === "single" ? "A" : null,
+          keyPoints,
+          explanation: keyPoints.join("；"),
+          evidenceQuote: sentenceExcerpt(source.text, 220),
+          sourceChunkIndexes: [sourceIndex],
+        },
+        sourceIndex,
+        sources,
+        requestedType,
+      ),
+    );
+  }
+
+  return questions;
+}
+
 function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }) {
   const cleanSourceText = sources
     .map((source, index) => `SOURCE ${index} (chunkId: ${source.id})\n${source.text}`)
@@ -719,12 +769,26 @@ export async function generateQuestionsFromSources({ sources, types, amount, exc
       amount: safeAmount - questions.length,
     });
     for (const question of fallbackQuestions) {
-      const normalizedTitle = normalizeQuestionTitle(question.title);
-      if (!normalizedTitle || blockedTitles.has(normalizedTitle)) continue;
+      let normalizedTitle = normalizeQuestionTitle(question.title);
+      if (!normalizedTitle) continue;
+      if (blockedTitles.has(normalizedTitle)) {
+        question.title = uniqueQuestionTitle(question.title, blockedTitles);
+        normalizedTitle = normalizeQuestionTitle(question.title);
+      }
       blockedTitles.add(normalizedTitle);
       questions.push(question);
       if (questions.length >= safeAmount) break;
     }
+  }
+
+  if (questions.length < safeAmount) {
+    const forcedFallbackQuestions = forcedFallbackQuestionsFromSources({
+      sources,
+      requestedTypes: allRequestedTypes.slice(questions.length),
+      amount: safeAmount - questions.length,
+      usedTitles: blockedTitles,
+    });
+    questions.push(...forcedFallbackQuestions);
   }
 
   if (!questions.length) throw new Error("Model returned no questions.");

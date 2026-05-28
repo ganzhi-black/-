@@ -101,8 +101,31 @@ test("re-login can recover visitor records by cached subject ids when the old vi
   assert.match(apiService, /headers\.set\("X-Claim-Subject-Ids", getClaimSubjectIds\(\)\.join\(","\)\)/);
   assert.match(server, /function subjectIdsForClaim\(req\)/);
   assert.match(server, /req\.get\("x-claim-subject-ids"\)/);
-  assert.match(server, /await store\.claimSubjectData\(\{\s*subjectIds: subjectIdsForClaim\(req\),\s*userId,\s*\}\)/);
+  assert.match(server, /const subjectIds = subjectIdsForClaim\(req\)/);
+  assert.match(server, /await store\.claimSubjectData\(\{\s*subjectIds,\s*userId,\s*\}\)/);
   assert.match(dbStore, /async claimSubjectData\(\{ subjectIds, userId \}\)/);
   assert.match(dbStore, /u\.nickname like 'visitor:%'/);
   assert.match(memoryStore, /claimSubjectData\(\{ subjectIds, userId \}\)/);
+});
+
+test("cached subject recovery verifies the target account before updating subject ownership", () => {
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const claimSubjectDataBlock = dbStore.match(/async claimSubjectData\(\{ subjectIds, userId \}\) \{[\s\S]*?\n    \},\n\n    async createUser/)?.[0] || "";
+
+  assert.match(claimSubjectDataBlock, /const targetUserResult = await client\.query\(\s*"select id from users where id = \$1 limit 1"/);
+  assert.match(claimSubjectDataBlock, /if \(!targetUserResult\.rows\[0\]\) \{\s*await client\.query\("commit"\);\s*return \{ claimed: false/);
+  assert.match(claimSubjectDataBlock, /const subjectResult = await client\.query/);
+});
+
+test("account data recovery failures are logged but do not block login", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const claimStart = server.indexOf("async function claimVisitorDataForUser");
+  const claimEnd = server.indexOf("async function resolveAuth");
+  const claimVisitorDataForUserBlock = claimStart >= 0 && claimEnd > claimStart ? server.slice(claimStart, claimEnd) : "";
+
+  assert.match(claimVisitorDataForUserBlock, /if \(!userId\) return/);
+  assert.match(claimVisitorDataForUserBlock, /try \{[\s\S]*await store\.claimVisitorData/);
+  assert.match(claimVisitorDataForUserBlock, /logWarn\("visitor_data_claim_failed"/);
+  assert.match(claimVisitorDataForUserBlock, /try \{[\s\S]*await store\.claimSubjectData/);
+  assert.match(claimVisitorDataForUserBlock, /logWarn\("subject_data_claim_failed"/);
 });

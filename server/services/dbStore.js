@@ -296,11 +296,17 @@ export async function createDbStore(databaseUrl) {
 
     async claimSubjectData({ subjectIds, userId }) {
       const validSubjectIds = [...new Set((subjectIds || []).filter((id) => isUuid(id)))];
-      if (!validSubjectIds.length || !userId) return { claimed: false };
+      if (!validSubjectIds.length || !isUuid(userId)) return { claimed: false };
 
       const client = await pool.connect();
       try {
         await client.query("begin");
+        const targetUserResult = await client.query("select id from users where id = $1 limit 1", [userId]);
+        if (!targetUserResult.rows[0]) {
+          await client.query("commit");
+          return { claimed: false, reason: "target_user_missing" };
+        }
+
         const ownerResult = await client.query(
           `
             select distinct s.user_id

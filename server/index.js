@@ -250,33 +250,55 @@ async function createLoginSession(req, res, user) {
 }
 
 async function claimVisitorDataForUser(req, userId) {
+  if (!userId) return;
+
   if (store.claimVisitorData) {
     for (const visitorId of visitorIdsForClaim(req)) {
-      const claimResult = await store.claimVisitorData({
-        visitorId,
-        userId,
-      });
-      if (claimResult?.claimed) {
-        req.logStep?.("visitor_data_claimed", {
+      try {
+        const claimResult = await store.claimVisitorData({
+          visitorId,
+          userId,
+        });
+        if (claimResult?.claimed) {
+          req.logStep?.("visitor_data_claimed", {
+            userId,
+            visitorId,
+            visitorUserId: claimResult.visitorUserId || null,
+            counts: claimResult.counts || {},
+          });
+        }
+      } catch (error) {
+        logWarn("visitor_data_claim_failed", {
+          ...requestLogBase(req),
           userId,
           visitorId,
-          visitorUserId: claimResult.visitorUserId || null,
-          counts: claimResult.counts || {},
+          error,
         });
       }
     }
   }
+
   if (store.claimSubjectData) {
-    const claimResult = await store.claimSubjectData({
-      subjectIds: subjectIdsForClaim(req),
-      userId,
-    });
-    if (claimResult?.claimed) {
-      req.logStep?.("subject_data_claimed", {
+    const subjectIds = subjectIdsForClaim(req);
+    try {
+      const claimResult = await store.claimSubjectData({
+        subjectIds,
         userId,
-        subjectIds: claimResult.subjectIds || [],
-        previousUserIds: claimResult.previousUserIds || [],
-        counts: claimResult.counts || {},
+      });
+      if (claimResult?.claimed) {
+        req.logStep?.("subject_data_claimed", {
+          userId,
+          subjectIds: claimResult.subjectIds || [],
+          previousUserIds: claimResult.previousUserIds || [],
+          counts: claimResult.counts || {},
+        });
+      }
+    } catch (error) {
+      logWarn("subject_data_claim_failed", {
+        ...requestLogBase(req),
+        userId,
+        subjectIds,
+        error,
       });
     }
   }

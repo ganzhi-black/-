@@ -218,19 +218,7 @@ function sessionCookieOptions() {
 }
 
 async function createLoginSession(req, res, user) {
-  if (store.claimVisitorData) {
-    const claimResult = await store.claimVisitorData({
-      visitorId: req.get("x-visitor-id"),
-      userId: user.id,
-    });
-    if (claimResult?.claimed) {
-      req.logStep?.("visitor_data_claimed", {
-        userId: user.id,
-        visitorUserId: claimResult.visitorUserId || null,
-        counts: claimResult.counts || {},
-      });
-    }
-  }
+  await claimVisitorDataForUser(req, user.id);
 
   const token = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -244,6 +232,22 @@ async function createLoginSession(req, res, user) {
   res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
 }
 
+async function claimVisitorDataForUser(req, userId) {
+  if (store.claimVisitorData) {
+    const claimResult = await store.claimVisitorData({
+      visitorId: req.get("x-visitor-id"),
+      userId,
+    });
+    if (claimResult?.claimed) {
+      req.logStep?.("visitor_data_claimed", {
+        userId,
+        visitorUserId: claimResult.visitorUserId || null,
+        counts: claimResult.counts || {},
+      });
+    }
+  }
+}
+
 async function resolveAuth(req, res, next) {
   try {
     const token = parseCookies(req.get("cookie"))[SESSION_COOKIE_NAME];
@@ -252,6 +256,7 @@ async function resolveAuth(req, res, next) {
       if (session) {
         req.user = publicUser(session);
         req.visitorId = req.user.id;
+        await claimVisitorDataForUser(req, req.user.id);
       }
     }
     next();

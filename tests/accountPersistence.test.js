@@ -61,5 +61,17 @@ test("login and register claim existing visitor-owned study data for the account
   assert.match(dbStore, /delete from mistakes visitor_mistakes/);
 
   assert.match(memoryStore, /claimVisitorData\(\{ visitorId, userId \}\)/);
-  assert.match(server, /await store\.claimVisitorData\(\{\s*visitorId: req\.get\("x-visitor-id"\),\s*userId: user\.id,\s*\}\)/);
+  assert.match(server, /async function claimVisitorDataForUser\(req, userId\)/);
+  assert.match(server, /await store\.claimVisitorData\(\{\s*visitorId: req\.get\("x-visitor-id"\),\s*userId,\s*\}\)/);
+  assert.match(server, /await claimVisitorDataForUser\(req, user\.id\)/);
+});
+
+test("already-authenticated sessions also claim visitor data and then send the account id", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const apiService = readFileSync("src/services/api.js", "utf8");
+
+  assert.match(server, /await claimVisitorDataForUser\(req, req\.user\.id\)/);
+  assert.match(apiService, /function setVisitorId\(visitorId\)/);
+  assert.match(apiService, /function rememberAuthenticatedUser\(user\)/);
+  assert.match(apiService, /return rememberAuthenticatedUser\(payload\.user\)/g);
 });

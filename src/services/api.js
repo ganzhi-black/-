@@ -52,6 +52,19 @@ function getVisitorId() {
   }
 }
 
+function setVisitorId(visitorId) {
+  try {
+    if (visitorId) window.localStorage.setItem(VISITOR_ID_KEY, visitorId);
+  } catch {
+    // Ignore storage failures; the auth cookie still identifies the account.
+  }
+}
+
+function rememberAuthenticatedUser(user) {
+  if (user?.id) setVisitorId(user.id);
+  return user;
+}
+
 async function requestOnce(path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Visitor-Id", getVisitorId());
@@ -351,8 +364,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password, nickname }),
     });
+    const user = rememberAuthenticatedUser(payload.user);
     await track("register_succeeded");
-    return payload.user;
+    return user;
   },
 
   async login({ email, password }) {
@@ -361,8 +375,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
+    const user = rememberAuthenticatedUser(payload.user);
     await track("login_succeeded");
-    return payload.user;
+    return user;
   },
 
   async logout() {
@@ -373,7 +388,7 @@ export const api = {
 
   async getCurrentUser() {
     const payload = await request("/api/auth/me");
-    return payload.user;
+    return rememberAuthenticatedUser(payload.user);
   },
 
   async getAdminMetrics() {

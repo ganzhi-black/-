@@ -7,7 +7,16 @@ import "./styles.css";
 
 const root = document.getElementById("root");
 
+function normalizeAuthHashRoute() {
+  const authPath = window.location.pathname.match(/^\/(login|register)\/?$/)?.[1];
+  if (!authPath) return;
+  const expectedHash = `#/${authPath}`;
+  if (window.location.hash === expectedHash) return;
+  window.history.replaceState(null, "", `${window.location.origin}/${expectedHash}`);
+}
+
 try {
+  normalizeAuthHashRoute();
   ReactDOM.createRoot(root).render(
     <React.StrictMode>
       <ErrorBoundary>

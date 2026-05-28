@@ -37,6 +37,7 @@ const eventLabels = {
   mistakes_viewed: "查看错题本",
   mistake_retry_started: "错题重做",
   bottom_nav_mistakes_clicked: "底部错题入口",
+  bottom_nav_history_clicked: "底部历史科目入口",
   summary_mistakes_clicked: "总结页错题入口",
   summary_mistakes_cta_viewed: "总结页错题引导曝光",
   home_mistakes_clicked: "首页错题入口",

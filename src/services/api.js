@@ -3,7 +3,7 @@ import { loadState, updateState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
-const DEFAULT_PRODUCTION_API_BASE_URL = "https://api-production-5b928.up.railway.app";
+const DEFAULT_PRODUCTION_API_BASE_URL = "https://web-production-60950.up.railway.app";
 const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
 const DEFAULT_RETRY_COUNT = 2;
 const RETRY_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 522, 523, 524]);
@@ -191,6 +191,47 @@ function normalizeSession(session) {
     skippedQuestionIndexes: Array.isArray(session?.skippedQuestionIndexes) ? session.skippedQuestionIndexes : [],
     currentIndex: Number.isFinite(Number(session?.currentIndex)) ? Number(session.currentIndex) : 0,
   };
+}
+
+function questionsFromLocalSubjectSessions(subjectId) {
+  const state = loadState();
+  const skippedIds = new Set();
+  const questions = [];
+  const seen = new Set();
+
+  for (const session of state.sessions.filter((item) => item.subjectId === subjectId)) {
+    const sessionQuestions = Array.isArray(session.questions) ? session.questions : [];
+    const skippedIndexes = new Set(session.skippedQuestionIndexes || []);
+    sessionQuestions.forEach((question, index) => {
+      if (skippedIndexes.has(index) && question?.id) skippedIds.add(question.id);
+      if (!question?.id || seen.has(question.id)) return;
+      seen.add(question.id);
+      questions.push({
+        ...question,
+        subjectId,
+        createdAt: question.generatedAt || session.createdAt,
+      });
+    });
+  }
+
+  return questions.map((question) => ({
+    ...question,
+    wasSkipped: skippedIds.has(question.id),
+  }));
+}
+
+function mergeSubjectQuestions(remoteQuestions, localQuestions) {
+  const byId = new Map();
+  for (const question of localQuestions) byId.set(question.id, question);
+  for (const question of remoteQuestions) {
+    const local = byId.get(question.id);
+    byId.set(question.id, {
+      ...question,
+      wasSkipped: Boolean(local?.wasSkipped),
+      createdAt: question.createdAt || question.generatedAt || local?.createdAt,
+    });
+  }
+  return [...byId.values()].sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
 }
 
 function cachedSession(sessionId) {
@@ -400,6 +441,46 @@ export const api = {
     }
   },
 
+  async getSubjectQuestions(subjectId) {
+    const localQuestions = questionsFromLocalSubjectSessions(subjectId);
+    try {
+      const remoteQuestions = await request(`/api/subjects/${subjectId}/questions`);
+      return mergeSubjectQuestions(Array.isArray(remoteQuestions) ? remoteQuestions : [], localQuestions);
+    } catch (error) {
+      console.warn("Subject question history endpoint failed, falling back to local sessions:", error);
+      return localQuestions;
+    }
+  },
+
+  async deleteSubjectQuestion({ subjectId, questionId }) {
+    try {
+      await request(`/api/subjects/${subjectId}/questions/${questionId}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      console.warn("Subject question delete endpoint failed, removing local copy only:", error);
+    }
+
+    updateState((draft) => {
+      for (const session of draft.sessions.filter((item) => item.subjectId === subjectId)) {
+        const removedIndexes = [];
+        session.questions = (session.questions || []).filter((question, index) => {
+          if (question.id !== questionId) return true;
+          removedIndexes.push(index);
+          return false;
+        });
+        if (removedIndexes.length && Array.isArray(session.skippedQuestionIndexes)) {
+          const removedIndexSet = new Set(removedIndexes);
+          session.skippedQuestionIndexes = session.skippedQuestionIndexes
+            .filter((index) => !removedIndexSet.has(index))
+            .map((index) => index - removedIndexes.filter((removedIndex) => removedIndex < index).length);
+        }
+      }
+      draft.answers = (draft.answers || []).filter((answer) => answer.questionId !== questionId);
+      draft.mistakes = (draft.mistakes || []).filter((mistake) => mistake.question?.id !== questionId && mistake.questionId !== questionId);
+    });
+  },
+
   async deleteSubject(subjectId) {
     await deleteSubject(subjectId);
     updateState((draft) => {
@@ -441,11 +522,20 @@ export const api = {
     }
 
     try {
-      const session = await request("/api/sessions", {
+      const expectedAmount = Math.min(50, Math.max(1, Number(amount) || 1));
+      const sessionPayload = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subjectId, types, amount, mode }),
-      });
+        body: JSON.stringify({ subjectId, types, amount: expectedAmount, mode }),
+      };
+      let session = await request("/api/sessions", sessionPayload);
+      if ((Array.isArray(session?.questions) ? session.questions.length : 0) < expectedAmount) {
+        console.warn("Generated session returned fewer questions than requested; retrying once.", {
+          requested: expectedAmount,
+          received: Array.isArray(session?.questions) ? session.questions.length : 0,
+        });
+        session = await request("/api/sessions", sessionPayload);
+      }
       await track("practice_started", {
         sessionId: session.id,
         subjectId,

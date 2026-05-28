@@ -1,4 +1,4 @@
-import { BarChart3, CirclePlus, Home, LibraryBig, LogOut, Plus } from "lucide-react";
+import { BarChart3, CirclePlus, History, Home, LibraryBig, LogOut, Plus } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { track } from "../services/api.js";
 
@@ -69,6 +69,10 @@ export default function AppShell({ children, user, onLogout }) {
           <NavLink to="/upload">
             <CirclePlus size={19} />
             <span>上传</span>
+          </NavLink>
+          <NavLink to="/subjects/history" onClick={() => track("bottom_nav_history_clicked")}>
+            <History size={19} />
+            <span>历史科目</span>
           </NavLink>
           <NavLink to="/mistakes" onClick={() => track("bottom_nav_mistakes_clicked")}>
             <LibraryBig size={19} />

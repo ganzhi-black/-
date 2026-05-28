@@ -215,6 +215,40 @@ export function createMemoryStore() {
         .reverse();
     },
 
+    listQuestionsForSubject({ visitorId, subjectId, limit = 500 }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      return savedQuestions
+        .filter((question) => question.visitorId === ownerId && question.subjectId === subjectId)
+        .slice(-limit)
+        .reverse();
+    },
+
+    deleteQuestionForSubject({ visitorId, subjectId, questionId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      const index = savedQuestions.findIndex((question) => question.visitorId === ownerId && question.subjectId === subjectId && question.id === questionId);
+      if (index < 0) return false;
+      savedQuestions.splice(index, 1);
+
+      for (let answerIndex = answers.length - 1; answerIndex >= 0; answerIndex -= 1) {
+        if (answers[answerIndex].visitorId === ownerId && answers[answerIndex].subjectId === subjectId && answers[answerIndex].questionId === questionId) {
+          answers.splice(answerIndex, 1);
+        }
+      }
+
+      for (let mistakeIndex = mistakes.length - 1; mistakeIndex >= 0; mistakeIndex -= 1) {
+        if (mistakes[mistakeIndex].visitorId === ownerId && mistakes[mistakeIndex].subjectId === subjectId && mistakes[mistakeIndex].questionId === questionId) {
+          mistakes.splice(mistakeIndex, 1);
+        }
+      }
+
+      for (const session of practiceSessions.filter((item) => item.visitorId === ownerId && item.subjectId === subjectId)) {
+        session.questions = (session.questions || []).filter((question) => question.id !== questionId);
+        session.questionIds = (session.questionIds || []).filter((id) => id !== questionId);
+      }
+
+      return true;
+    },
+
     getQuestionsByIds({ visitorId, subjectId, questionIds }) {
       const ownerId = normalizeVisitorId(visitorId);
       const questionIdSet = new Set(questionIds || []);

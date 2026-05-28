@@ -11,6 +11,7 @@ import ResultPage from "./pages/ResultPage.jsx";
 import SummaryPage from "./pages/SummaryPage.jsx";
 import MistakesPage from "./pages/MistakesPage.jsx";
 import HistorySubjectsPage from "./pages/HistorySubjectsPage.jsx";
+import SubjectHistoryPage from "./pages/SubjectHistoryPage.jsx";
 import { api } from "./services/api.js";
 
 function RequireAuth({ user, children }) {
@@ -60,6 +61,7 @@ export default function App() {
         <Route path="/" element={<RequireAuth user={user}><HomePage /></RequireAuth>} />
         <Route path="/upload" element={<RequireAuth user={user}><UploadPage /></RequireAuth>} />
         <Route path="/subjects/history" element={<RequireAuth user={user}><HistorySubjectsPage /></RequireAuth>} />
+        <Route path="/subjects/:subjectId/history" element={<RequireAuth user={user}><SubjectHistoryPage /></RequireAuth>} />
         <Route path="/subjects/:subjectId/settings" element={<RequireAuth user={user}><SettingsPage /></RequireAuth>} />
         <Route path="/quiz/:sessionId" element={<RequireAuth user={user}><QuizPage /></RequireAuth>} />
         <Route path="/result/:sessionId/:questionIndex" element={<RequireAuth user={user}><ResultPage /></RequireAuth>} />

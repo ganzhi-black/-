@@ -556,6 +556,85 @@ export async function createDbStore(databaseUrl) {
       }));
     },
 
+    async listQuestionsForSubject({ visitorId, subjectId, limit = 500 }) {
+      if (!isUuid(subjectId)) return [];
+      const userId = await getUserId(visitorId);
+      const result = await pool.query(
+        `
+          select
+            q.id,
+            q.subject_id,
+            q.type,
+            q.title,
+            q.options,
+            q.correct_answer,
+            q.key_points,
+            q.explanation,
+            q.evidence_quote,
+            q.source_chunk_ids,
+            coalesce((
+              select string_agg(expanded.chunk_text, E'\n\n' order by expanded.document_id, expanded.chunk_index)
+              from (
+                select distinct dc.document_id, dc.chunk_index, dc.chunk_text
+                from document_chunks selected
+                join document_chunks dc
+                  on dc.user_id = selected.user_id
+                  and dc.subject_id = selected.subject_id
+                  and dc.document_id = selected.document_id
+                  and dc.chunk_index between selected.chunk_index - 1 and selected.chunk_index + 1
+                where selected.id = any(q.source_chunk_ids)
+              ) expanded
+            ), '') as source_text,
+            q.created_at
+          from questions q
+          where q.user_id = $1
+            and q.subject_id = $2
+          order by q.created_at desc
+          limit $3
+        `,
+        [userId, subjectId, limit],
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        subjectId: row.subject_id,
+        type: row.type,
+        title: row.title,
+        options: row.options,
+        correctAnswer: row.correct_answer,
+        explanation: row.explanation,
+        keyPoints: row.key_points || [],
+        evidenceQuote: row.evidence_quote || "",
+        sourceChunkIds: row.source_chunk_ids || [],
+        sourceText: row.source_text || "",
+        sourceLocation: "原文出处",
+        createdAt: row.created_at,
+      }));
+    },
+
+    async deleteQuestionForSubject({ visitorId, subjectId, questionId }) {
+      if (!isUuid(subjectId) || !isUuid(questionId)) return false;
+      const userId = await getUserId(visitorId);
+      const result = await pool.query(
+        "delete from questions where user_id = $1 and subject_id = $2 and id = $3",
+        [userId, subjectId, questionId],
+      );
+      if (result.rowCount > 0) {
+        await pool.query(
+          `
+            update practice_sessions
+            set question_ids = array_remove(question_ids, $3::uuid),
+                question_count = greatest(question_count - 1, 0)
+            where user_id = $1
+              and subject_id = $2
+              and $3::uuid = any(question_ids)
+          `,
+          [userId, subjectId, questionId],
+        );
+      }
+      return result.rowCount > 0;
+    },
+
     async getQuestionsByIds({ visitorId, subjectId, questionIds }) {
       if (!isUuid(subjectId)) return [];
       const userId = await getUserId(visitorId);

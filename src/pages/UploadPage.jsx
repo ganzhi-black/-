@@ -1,6 +1,6 @@
-import { AlertCircle, ArrowRight, Check, Clock3, FileQuestion, History, SlidersHorizontal, UploadCloud } from "lucide-react";
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { AlertCircle, Check, FileQuestion, SlidersHorizontal, UploadCloud } from "lucide-react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import { api, track } from "../services/api.js";
 
@@ -18,18 +18,8 @@ export default function UploadPage() {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [dashboard, setDashboard] = useState(null);
   const [types, setTypes] = useState(["single", "short", "essay"]);
   const [amount, setAmount] = useState(6);
-
-  const subjectCount = dashboard?.subjects?.length || 0;
-
-  useEffect(() => {
-    const load = () => api.getDashboard().then(setDashboard);
-    load();
-    window.addEventListener("qimoshua:state-change", load);
-    return () => window.removeEventListener("qimoshua:state-change", load);
-  }, []);
 
   function pickFile(nextFile) {
     setError("");
@@ -155,19 +145,6 @@ export default function UploadPage() {
           {loading ? "出题中，请您稍作等待" : "开始出题"}
         </LoadingButton>
       </form>
-
-      <section className="setting-card history-entry-card">
-        <div className="setting-title">
-          <History size={20} />
-          <h2>历史科目</h2>
-        </div>
-        <p>查看曾经上传过的科目，继续使用之前的资料出题练习。</p>
-        <Link className="secondary-button full" to="/subjects/history">
-          <Clock3 size={18} />
-          {subjectCount ? `查看 ${subjectCount} 个历史科目` : "暂无历史科目"}
-          <ArrowRight size={18} />
-        </Link>
-      </section>
     </div>
   );
 }

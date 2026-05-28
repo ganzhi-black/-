@@ -223,6 +223,38 @@ function compactText(value) {
   return normalizeText(value).replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, "").toLowerCase();
 }
 
+function questionTitleFingerprint(title) {
+  return compactText(titleStem(title));
+}
+
+function titleKeys(title) {
+  return [normalizeQuestionTitle(title), questionTitleFingerprint(title) ? `stem:${questionTitleFingerprint(title)}` : ""].filter(Boolean);
+}
+
+function hasQuestionTitle(usedTitles, title) {
+  return titleKeys(title).some((key) => usedTitles.has(key));
+}
+
+function rememberQuestionTitle(usedTitles, title) {
+  for (const key of titleKeys(title)) usedTitles.add(key);
+}
+
+function questionContentKeys(question) {
+  const keyPoints = Array.isArray(question?.keyPoints) ? question.keyPoints : [];
+  return [
+    questionTitleFingerprint(question?.title),
+    keyPoints.slice(0, 3).map(compactText).filter(Boolean).join("|"),
+  ].filter((key) => key && key.length >= 8);
+}
+
+function hasQuestionContent(usedContent, question) {
+  return questionContentKeys(question).some((key) => usedContent.has(key));
+}
+
+function rememberQuestionContent(usedContent, question) {
+  for (const key of questionContentKeys(question)) usedContent.add(key);
+}
+
 function titleStem(title) {
   return normalizeText(title)
     .replace(/^(?:\u8bf7)?(?:\u7b80\u8ff0|\u8bd5\u8ff0|\u8bba\u8ff0|\u5206\u6790|\u6982\u62ec|\u8bf4\u660e|\u8c08\u8c08)/, "")
@@ -292,6 +324,57 @@ function cleanKeyPoints(question, keyPoints, sourceText) {
     if (!cleaned.includes(point)) cleaned.push(point);
   }
   return cleaned.length ? cleaned.slice(0, question.type === "essay" ? 8 : 6) : keyPoints.filter((point) => !isMetaKeyPoint(point, question.title)).slice(0, question.type === "essay" ? 8 : 6);
+}
+
+const OPTION_LABELS = ["A", "B", "C", "D"];
+const FALLBACK_DISTRACTORS = [
+  "\u8be5\u8868\u8ff0\u4e0e\u539f\u6587\u8981\u70b9\u4e0d\u4e00\u81f4",
+  "\u8be5\u8868\u8ff0\u53ea\u80fd\u88ab\u8d44\u6599\u90e8\u5206\u652f\u6301",
+  "\u8be5\u8868\u8ff0\u6df7\u5408\u4e86\u65e0\u5173\u7247\u6bb5\u5185\u5bb9",
+  "\u8be5\u8868\u8ff0\u5c06\u6b21\u8981\u4fe1\u606f\u8bef\u5f53\u7b54\u6848",
+  "\u8be5\u8868\u8ff0\u8d85\u51fa\u4e86\u8d44\u6599\u652f\u6301\u8303\u56f4",
+  "\u8be5\u8868\u8ff0\u628a\u76f8\u90bb\u6982\u5ff5\u8bef\u5f53\u672c\u9898\u7b54\u6848",
+];
+
+function normalizeCorrectAnswer(value) {
+  const answer = String(value || "").trim().slice(0, 1).toUpperCase();
+  return OPTION_LABELS.includes(answer) ? answer : "A";
+}
+
+function uniqueOptionText(rawText, usedTexts, fallbackIndex = 0) {
+  let candidate = normalizeText(rawText);
+  let attempts = 0;
+  while (!candidate || usedTexts.has(compactText(candidate))) {
+    const fallback = FALLBACK_DISTRACTORS[(fallbackIndex + attempts) % FALLBACK_DISTRACTORS.length];
+    candidate = attempts >= FALLBACK_DISTRACTORS.length ? `${fallback}\uff08${attempts + 1}\uff09` : fallback;
+    attempts += 1;
+  }
+  usedTexts.add(compactText(candidate));
+  return candidate;
+}
+
+function normalizeSingleOptions(question, keyPoints, sourceText) {
+  const rawOptions = Array.isArray(question.options) ? question.options : [];
+  const correctAnswer = normalizeCorrectAnswer(question.correctAnswer);
+  const correctIndex = OPTION_LABELS.indexOf(correctAnswer);
+  const correctFallback = normalizeText(keyPoints[0]) || sentenceExcerpt(sourceText, 80) || "\u8d44\u6599\u4e2d\u6700\u76f4\u63a5\u652f\u6301\u7684\u8868\u8ff0";
+  const usedTexts = new Set();
+  const normalizedOptions = new Array(OPTION_LABELS.length);
+
+  normalizedOptions[correctIndex] = {
+    label: OPTION_LABELS[correctIndex],
+    text: uniqueOptionText(normalizeText(rawOptions[correctIndex]?.text) || correctFallback, usedTexts, correctIndex),
+  };
+
+  for (let optionIndex = 0; optionIndex < OPTION_LABELS.length; optionIndex += 1) {
+    if (optionIndex === correctIndex) continue;
+    normalizedOptions[optionIndex] = {
+      label: OPTION_LABELS[optionIndex],
+      text: uniqueOptionText(rawOptions[optionIndex]?.text, usedTexts, optionIndex),
+    };
+  }
+
+  return normalizedOptions;
 }
 
 function splitSentences(text) {
@@ -370,6 +453,42 @@ function inferTypeFromText(text, requestedType) {
   return ["single", "term", "short", "essay"].includes(requestedType) ? requestedType : "short";
 }
 
+function inferTypeFromTitle(title, requestedType) {
+  const text = normalizeText(title);
+  if (/^(?:请)?(?:论述|试述|分析|比较|评价|谈谈)/.test(text)) return "essay";
+  if (/^(?:请)?(?:简述|简析|说明|概括|解释|回答|指出|列举)/.test(text)) return "short";
+  return inferTypeFromText(text, requestedType);
+}
+
+function isSubjectiveTitle(title) {
+  return /^(?:请)?(?:简述|简析|试述|论述|分析|说明|概括|解释|回答|指出|列举|比较|评价|谈谈)/.test(normalizeText(title));
+}
+
+function optionMarkerIndex(text) {
+  const normalized = normalizeText(text);
+  const matches = [...normalized.matchAll(/[a-dA-D][\s.．、:：]*(?=[\u4e00-\u9fff])/g)];
+  const hit = matches.find((match) => Number(match.index) >= 8);
+  return Number.isInteger(hit?.index) ? hit.index : -1;
+}
+
+function hasEmbeddedOptionMarkers(title) {
+  return optionMarkerIndex(title) >= 0;
+}
+
+function cleanGeneratedTitle(title) {
+  const text = normalizeText(title);
+  const optionIndex = optionMarkerIndex(text);
+  return (optionIndex >= 0 ? text.slice(0, optionIndex) : text)
+    .replace(/(?:答案|解析)[:：].*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shouldDemoteSingleQuestion(title) {
+  const cleaned = cleanGeneratedTitle(title);
+  return isSubjectiveTitle(cleaned) || hasEmbeddedOptionMarkers(title) || compactText(cleaned).length > 90;
+}
+
 function cleanQuestionTitle(line) {
   return stripMarkdownMarker(line)
     .replace(/^(?:\d{1,3}[\u3001\uff0e.)．、]|\(\d{1,3}\)|\uff08\d{1,3}\uff09|[一二三四五六七八九十]{1,4}[\u3001\uff0e.)．、])\s*/, "")
@@ -430,13 +549,8 @@ function fallbackTitleFromSource(sourceText, requestedType) {
 }
 
 function fallbackOptionsFromPoints(keyPoints) {
-  const correct = keyPoints[0] || "资料中的核心表述";
-  const distractors = keyPoints.slice(1, 4);
-  while (distractors.length < 3) distractors.push("资料中未直接支持的表述");
-  return [correct, ...distractors].slice(0, 4).map((text, index) => ({
-    label: ["A", "B", "C", "D"][index],
-    text,
-  }));
+  const rawOptions = [keyPoints[0], ...keyPoints.slice(1, 4)].map((text) => ({ text }));
+  return normalizeSingleOptions({ options: rawOptions, correctAnswer: "A" }, keyPoints, keyPoints.join("\n"));
 }
 
 function fallbackQuestionsFromSources({ sources, requestedTypes, amount }) {
@@ -447,15 +561,15 @@ function fallbackQuestionsFromSources({ sources, requestedTypes, amount }) {
     const source = sources[index];
     const requestedType = requestedTypes[questions.length % Math.max(1, requestedTypes.length)] || "short";
     const titleInfo = fallbackTitleFromSource(source.text, requestedType);
-    const title = normalizeQuestionTitle(titleInfo.title);
-    if (!title || usedTitles.has(title)) continue;
+    const title = titleInfo.title;
+    if (!normalizeQuestionTitle(title) || hasQuestionTitle(usedTitles, title)) continue;
 
     const rawPoints = extractKeyPointsFromSource(source.text, titleInfo.rawLine);
-    const type = inferTypeFromText(titleInfo.rawLine || title, requestedType);
+    const type = inferTypeFromTitle(titleInfo.rawLine || title, requestedType);
     const keyPoints = cleanKeyPoints({ title, type, keyPoints: rawPoints }, rawPoints, source.text);
     if (!keyPoints.length) continue;
 
-    usedTitles.add(title);
+    rememberQuestionTitle(usedTitles, title);
     questions.push(
       normalizeQuestion(
         {
@@ -482,7 +596,7 @@ function uniqueQuestionTitle(title, usedTitles) {
   const base = String(title || "").trim() || "资料要点练习";
   let candidate = base;
   let counter = 2;
-  while (usedTitles.has(normalizeQuestionTitle(candidate))) {
+  while (hasQuestionTitle(usedTitles, candidate)) {
     candidate = `${base}（补充练习${counter}）`;
     counter += 1;
   }
@@ -500,12 +614,12 @@ function forcedFallbackQuestionsFromSources({ sources, requestedTypes, amount, u
     const requestedType = requestedTypes[questions.length % Math.max(1, requestedTypes.length)] || "short";
     const titleInfo = fallbackTitleFromSource(source.text, requestedType);
     const rawPoints = extractKeyPointsFromSource(source.text, titleInfo.rawLine);
-    const type = inferTypeFromText(titleInfo.rawLine || titleInfo.title, requestedType);
+    const type = inferTypeFromTitle(titleInfo.rawLine || titleInfo.title, requestedType);
     const keyPoints = cleanKeyPoints({ title: titleInfo.title, type, keyPoints: rawPoints }, rawPoints, source.text);
     if (!keyPoints.length) continue;
 
     const title = uniqueQuestionTitle(titleInfo.title, usedTitles);
-    usedTitles.add(normalizeQuestionTitle(title));
+    rememberQuestionTitle(usedTitles, title);
     questions.push(
       normalizeQuestion(
         {
@@ -528,6 +642,53 @@ function forcedFallbackQuestionsFromSources({ sources, requestedTypes, amount, u
   return questions;
 }
 
+function rawFallbackPoints(sourceText, requestedType) {
+  const sentences = splitSentences(sourceText).slice(0, requestedType === "essay" ? 6 : 4);
+  if (sentences.length) return sentences;
+
+  const excerpt = sentenceExcerpt(sourceText, requestedType === "essay" ? 420 : 260);
+  if (excerpt) return [excerpt];
+
+  const compact = normalizeText(sourceText);
+  return compact ? [compact.slice(0, requestedType === "essay" ? 420 : 260)] : ["请回到原文复习这一资料片段的核心内容。"];
+}
+
+function lastResortQuestionsFromSources({ sources, requestedTypes, amount, usedTitles }) {
+  const questions = [];
+  if (!sources.length || amount <= 0) return questions;
+
+  for (let index = 0; questions.length < amount; index += 1) {
+    const sourceIndex = index % sources.length;
+    const source = sources[sourceIndex];
+    const requestedType = requestedTypes[questions.length % Math.max(1, requestedTypes.length)] || "short";
+    const type = ["single", "term", "short", "essay"].includes(requestedType) ? requestedType : "short";
+    const keyPoints = rawFallbackPoints(source.text, type);
+    const titlePrefix = type === "single" ? "根据资料，下列说法正确的是哪一项？" : type === "term" ? "解释资料中的核心概念" : type === "essay" ? "结合资料论述核心内容" : "简述资料中的核心内容";
+    const title = uniqueQuestionTitle(titlePrefix, usedTitles);
+    rememberQuestionTitle(usedTitles, title);
+
+    questions.push(
+      normalizeQuestion(
+        {
+          type,
+          title,
+          options: type === "single" ? fallbackOptionsFromPoints(keyPoints) : null,
+          correctAnswer: type === "single" ? "A" : null,
+          keyPoints,
+          explanation: keyPoints.join("；"),
+          evidenceQuote: sentenceExcerpt(source.text, 220) || keyPoints[0],
+          sourceChunkIndexes: [sourceIndex],
+        },
+        sourceIndex,
+        sources,
+        type,
+      ),
+    );
+  }
+
+  return questions;
+}
+
 function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }) {
   const cleanSourceText = sources
     .map((source, index) => `SOURCE ${index} (chunkId: ${source.id})\n${source.text}`)
@@ -543,6 +704,7 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
     `Generate ${amount} exam practice questions in this exact requested type order: ${requestedTypes.join(", ")}.`,
     "You are extracting and normalizing questions from the retrieved RAG chunks, not inventing a general quiz.",
     "Highest priority:",
+    "0. SOURCE 0 is the primary target for this question. Use other SOURCES only as nearby context or distractors unless SOURCE 0 cannot support the requested type.",
     "1. If a SOURCE contains existing exam questions, practice questions, numbered questions, or labels like \u7b80\u7b54\u9898/\u8bba\u8ff0\u9898/\u540d\u8bcd\u89e3\u91ca/\u9009\u62e9\u9898, copy or lightly normalize those questions first.",
     "2. If a SOURCE marks \u91cd\u70b9/\u8003\u70b9/\u9ad8\u9891/\u5fc5\u80cc/\u5fc5\u8003/\u6838\u5fc3, generate questions only from those marked parts.",
     "3. Only if no existing question is available, generate a question from a single important point in the SOURCE.",
@@ -552,7 +714,7 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
     "7. keyPoints must be real answer points only. Do not include the question title, a summary like 'includes four aspects', question type labels, answer direction, or content from the next/previous question.",
     "8. When a SOURCE is an existing numbered exam question, treat the lines below it as its answer until the next numbered question starts. Numbered answer points like 1/2/3/4 belong to the current question, not to new questions.",
     "Type rules:",
-    "- single: four options A/B/C/D and one correctAnswer.",
+    "- single: four options A/B/C/D and one correctAnswer. The title must be a concise objective choice question; it must not start with 简述/论述/分析/说明/概括/解释/回答/列举 and must not contain option text like A/B/C/D inside the title.",
     "- term: use for \u540d\u8bcd\u89e3\u91ca or clear term-definition material.",
     "- short: 2-5 keyPoints, suitable for concept/features/reasons/categories.",
     "- essay: 4-8 keyPoints, only when the SOURCE really supports analysis, comparison, causes, influence, or features.",
@@ -627,7 +789,9 @@ function buildPrompt({ sources, requestedTypes, amount, excludedQuestions = [] }
 }
 
 function normalizeQuestion(question, index, sources, requestedType) {
-  const type = ["single", "term", "short", "essay"].includes(question.type) ? question.type : requestedType;
+  const title = cleanGeneratedTitle(question.title);
+  const modelType = ["single", "term", "short", "essay"].includes(question.type) ? question.type : requestedType;
+  const type = modelType === "single" && shouldDemoteSingleQuestion(question.title) ? inferTypeFromTitle(title, "short") : modelType;
   const sourceIndexes = Array.isArray(question.sourceChunkIndexes)
     ? question.sourceChunkIndexes.filter((item) => Number.isInteger(item) && sources[item])
     : [];
@@ -635,23 +799,18 @@ function normalizeQuestion(question, index, sources, requestedType) {
   const expandedIndexes = sourceIndexes.length ? expandedSourceIndexes(sourceIndexes, sources) : [];
   const sourceChunkIds = expandedIndexes.length ? expandedIndexes.map((item) => sources[item].id) : fallbackSource ? [fallbackSource.id] : [];
   const sourceText = expandedIndexes.length ? expandedIndexes.map((item) => sources[item].text).join("\n\n") : fallbackSource?.text || "";
-  const keyPoints = cleanKeyPoints(question, fallbackKeyPoints(question, sourceText), sourceText);
+  const normalizedQuestion = { ...question, title, type };
+  const keyPoints = cleanKeyPoints(normalizedQuestion, fallbackKeyPoints(normalizedQuestion, sourceText), sourceText);
   const evidenceQuote = normalizeText(question.evidenceQuote) || sentenceExcerpt(sourceText || question.explanation);
   const explanation = normalizeText(question.explanation) || keyPoints.join("\uff1b");
 
-  const options =
-    type === "single"
-      ? (question.options || []).slice(0, 4).map((option, optionIndex) => ({
-          label: ["A", "B", "C", "D"][optionIndex],
-          text: String(option.text || "").trim(),
-        }))
-      : null;
+  const options = type === "single" ? normalizeSingleOptions(question, keyPoints, sourceText) : null;
 
   return {
     type,
-    title: String(question.title || "").trim(),
+    title,
     options,
-    correctAnswer: type === "single" ? String(question.correctAnswer || "").trim().slice(0, 1) : null,
+    correctAnswer: type === "single" ? normalizeCorrectAnswer(question.correctAnswer) : null,
     keyPoints,
     explanation,
     evidenceQuote,
@@ -732,50 +891,76 @@ export async function generateQuestionsFromSources({ sources, types, amount, exc
   if (provider === "none") throw new Error("Set DEEPSEEK_API_KEY in .env before generating questions.");
 
   const allRequestedTypes = normalizeTypeList(types, safeAmount);
-  const blockedTitles = new Set(excludedQuestions.map((question) => normalizeQuestionTitle(question.title)).filter(Boolean));
-  const generatedResults = await Promise.all(
-    allRequestedTypes.map((requestedType, index) =>
-      generateSingleQuestion({
-        provider,
-        sources: selectBatchSources(sources, index, 1),
-        requestedType,
-        excludedQuestions,
-        index,
-      }),
-    ),
-  );
-
+  const blockedTitles = new Set();
+  const blockedContent = new Set();
+  for (const question of excludedQuestions) {
+    rememberQuestionTitle(blockedTitles, question.title);
+    rememberQuestionContent(blockedContent, question);
+  }
   const questions = [];
   const missingTypes = [];
-  for (let index = 0; index < generatedResults.length; index += 1) {
-    const question = generatedResults[index];
+  const rollingExcludedQuestions = [...excludedQuestions];
+  for (let index = 0; index < allRequestedTypes.length; index += 1) {
+    const requestedType = allRequestedTypes[index];
+    const question = await generateSingleQuestion({
+      provider,
+      sources: selectBatchSources(sources, index, 1),
+      requestedType,
+      excludedQuestions: rollingExcludedQuestions,
+      index,
+    });
     if (!question) {
-      missingTypes.push(allRequestedTypes[index]);
+      missingTypes.push(requestedType);
       continue;
     }
-    const normalizedTitle = normalizeQuestionTitle(question.title);
-    if (!normalizedTitle || blockedTitles.has(normalizedTitle)) {
-      missingTypes.push(allRequestedTypes[index]);
+    if (!normalizeQuestionTitle(question.title) || hasQuestionTitle(blockedTitles, question.title) || hasQuestionContent(blockedContent, question)) {
+      missingTypes.push(requestedType);
       continue;
     }
-    blockedTitles.add(normalizedTitle);
+    rememberQuestionTitle(blockedTitles, question.title);
+    rememberQuestionContent(blockedContent, question);
     questions.push(question);
+    rollingExcludedQuestions.push({ type: question.type, title: question.title, keyPoints: question.keyPoints, sourceChunkIds: question.sourceChunkIds });
+  }
+
+  let fallbackTypes = missingTypes;
+  if (questions.length < safeAmount && missingTypes.length) {
+    fallbackTypes = [];
+    for (let index = 0; index < missingTypes.length; index += 1) {
+      const requestedType = missingTypes[index];
+      const question = await generateSingleQuestion({
+        provider,
+        sources: selectBatchSources(sources, safeAmount + index * 3, 1),
+        requestedType,
+        excludedQuestions: rollingExcludedQuestions,
+        index: safeAmount + index,
+      });
+      if (!question || !normalizeQuestionTitle(question.title) || hasQuestionTitle(blockedTitles, question.title) || hasQuestionContent(blockedContent, question)) {
+        fallbackTypes.push(requestedType);
+        continue;
+      }
+      rememberQuestionTitle(blockedTitles, question.title);
+      rememberQuestionContent(blockedContent, question);
+      questions.push(question);
+      rollingExcludedQuestions.push({ type: question.type, title: question.title, keyPoints: question.keyPoints, sourceChunkIds: question.sourceChunkIds });
+      if (questions.length >= safeAmount) break;
+    }
   }
 
   if (questions.length < safeAmount) {
     const fallbackQuestions = fallbackQuestionsFromSources({
       sources,
-      requestedTypes: missingTypes.length ? missingTypes : allRequestedTypes.slice(questions.length),
+      requestedTypes: fallbackTypes.length ? fallbackTypes : allRequestedTypes.slice(questions.length),
       amount: safeAmount - questions.length,
     });
     for (const question of fallbackQuestions) {
-      let normalizedTitle = normalizeQuestionTitle(question.title);
-      if (!normalizedTitle) continue;
-      if (blockedTitles.has(normalizedTitle)) {
+      if (!normalizeQuestionTitle(question.title)) continue;
+      if (hasQuestionContent(blockedContent, question)) continue;
+      if (hasQuestionTitle(blockedTitles, question.title)) {
         question.title = uniqueQuestionTitle(question.title, blockedTitles);
-        normalizedTitle = normalizeQuestionTitle(question.title);
       }
-      blockedTitles.add(normalizedTitle);
+      rememberQuestionTitle(blockedTitles, question.title);
+      rememberQuestionContent(blockedContent, question);
       questions.push(question);
       if (questions.length >= safeAmount) break;
     }
@@ -788,7 +973,26 @@ export async function generateQuestionsFromSources({ sources, types, amount, exc
       amount: safeAmount - questions.length,
       usedTitles: blockedTitles,
     });
-    questions.push(...forcedFallbackQuestions);
+    for (const question of forcedFallbackQuestions) {
+      if (questions.length >= safeAmount) break;
+      if (hasQuestionContent(blockedContent, question)) continue;
+      rememberQuestionContent(blockedContent, question);
+      questions.push(question);
+    }
+  }
+
+  if (questions.length < safeAmount) {
+    const lastResortQuestions = lastResortQuestionsFromSources({
+      sources,
+      requestedTypes: allRequestedTypes.slice(questions.length),
+      amount: safeAmount - questions.length,
+      usedTitles: blockedTitles,
+    });
+    for (const question of lastResortQuestions) {
+      if (questions.length >= safeAmount) break;
+      rememberQuestionContent(blockedContent, question);
+      questions.push(question);
+    }
   }
 
   if (!questions.length) throw new Error("Model returned no questions.");

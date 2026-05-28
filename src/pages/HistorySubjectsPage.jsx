@@ -61,13 +61,13 @@ export default function HistorySubjectsPage() {
   return (
     <div className="stack">
       <section className="page-title">
-        <Link className="text-link" to="/upload">
+        <Link className="text-link" to="/">
           <ArrowLeft size={16} />
-          返回上传
+          返回首页
         </Link>
         <p className="eyebrow muted">历史科目</p>
         <h1>继续使用已上传资料</h1>
-        <p>点击科目后，会进入这门课的练习设置页，可以继续选择题型和题量出题。</p>
+        <p>点击科目后，可以查看这份资料已经出过的题，也可以继续生成不重复的新题。</p>
       </section>
 
       {dashboard.subjects.length === 0 ? (
@@ -76,7 +76,7 @@ export default function HistorySubjectsPage() {
         <div className="subject-grid history-subject-grid">
           {dashboard.subjects.map((subject) => (
             <div className="subject-card history-subject-card" key={subject.id}>
-              <Link className="subject-card-link" to={`/subjects/${subject.id}/settings`}>
+              <Link className="subject-card-link" to={`/subjects/${subject.id}/history`}>
                 <div className="subject-icon">
                   <BookMarked size={22} />
                 </div>

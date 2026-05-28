@@ -10,6 +10,7 @@ export default function AuthPage({ mode = "login", user, onAuthenticated }) {
   const isRegister = mode === "register";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [nickname, setNickname] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -20,6 +21,12 @@ export default function AuthPage({ mode = "login", user, onAuthenticated }) {
   async function submit(event) {
     event.preventDefault();
     setError("");
+    if (isRegister && password !== confirmPassword) {
+      setError("两次输入的密码不一致，请重新输入。");
+      setPassword("");
+      setConfirmPassword("");
+      return;
+    }
     setLoading(true);
     const normalizedEmail = email.trim().toLowerCase();
     try {
@@ -68,6 +75,16 @@ export default function AuthPage({ mode = "login", user, onAuthenticated }) {
               <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 8 位" minLength={8} required />
             </div>
           </label>
+
+          {isRegister && (
+            <label className="field">
+              <span>确认密码</span>
+              <div className="auth-input">
+                <LockKeyhole size={18} />
+                <input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="请再次输入密码" minLength={8} required />
+              </div>
+            </label>
+          )}
 
           {error && (
             <div className="notice error">

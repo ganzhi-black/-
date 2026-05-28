@@ -5,12 +5,14 @@ import express from "express";
 import http from "node:http";
 import multer from "multer";
 import { chunkText } from "./services/chunker.js";
+import { corsHeadersForRequest, createCorsOptions, effectiveCorsOrigins } from "./services/corsPolicy.js";
 import { embedTexts } from "./services/embeddings.js";
 import { extractTextFromFile } from "./services/extractText.js";
 import { createDbStore } from "./services/dbStore.js";
 import { createMemoryStore } from "./services/memoryStore.js";
 import { gradeSingleAnswer, gradeSubjectiveAnswer } from "./services/aiGrader.js";
 import { generateQuestionsFromSources } from "./services/aiQuestions.js";
+import { createRequestId, logError, logInfo, logWarn } from "./services/logger.js";
 import { setupQwenRealtimeAsr } from "./services/qwenRealtimeAsr.js";
 import { repairMojibake } from "./services/textRepair.js";
 import { transcribeAudioFile } from "./services/transcription.js";
@@ -49,46 +51,87 @@ const upload = multer({
 const useMemoryStore = process.env.USE_MEMORY_STORE === "1";
 const store = !useMemoryStore && process.env.DATABASE_URL ? await createDbStore(process.env.DATABASE_URL) : createMemoryStore();
 
-function createCorsOptions() {
-  const configuredOrigins = String(process.env.CORS_ORIGINS || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+const configuredCorsOrigins = effectiveCorsOrigins(process.env.CORS_ORIGINS || "");
+const DEPLOY_VERSION = "cors-debug-2026-05-28-1";
 
-  if (configuredOrigins.length === 0 || configuredOrigins.includes("*")) {
-    return {
-      origin: true,
-      credentials: true,
-    };
+app.use((req, res, next) => {
+  res.setHeader("X-Qimoshua-Build", DEPLOY_VERSION);
+  const corsHeaders = corsHeadersForRequest({
+    origin: req.get("origin"),
+    requestHeaders: req.get("access-control-request-headers"),
+    configuredOrigins: configuredCorsOrigins,
+  });
+
+  if (corsHeaders) {
+    for (const [key, value] of Object.entries(corsHeaders)) res.setHeader(key, value);
   }
 
-  const allowedOrigins = new Set(configuredOrigins);
-  function isAllowedOrigin(origin) {
-    if (allowedOrigins.has(origin)) return true;
-    try {
-      const hostname = new URL(origin).hostname;
-      return configuredOrigins.some((allowedOrigin) => {
-        if (!allowedOrigin.includes("*.")) return false;
-        const allowedUrl = new URL(allowedOrigin.replace("*.", ""));
-        const suffix = `.${allowedUrl.hostname}`;
-        return allowedUrl.protocol === new URL(origin).protocol && hostname.endsWith(suffix);
-      });
-    } catch {
-      return false;
-    }
+  if (req.method === "OPTIONS") {
+    logInfo("cors_preflight", {
+      build: DEPLOY_VERSION,
+      origin: req.get("origin") || "",
+      path: req.originalUrl || req.url,
+      allowed: Boolean(corsHeaders),
+      requestHeaders: req.get("access-control-request-headers") || "",
+      configuredOriginCount: configuredCorsOrigins.length,
+    });
+    return res.status(corsHeaders ? 204 : 403).end();
   }
 
+  next();
+});
+
+app.use(cors(createCorsOptions(configuredCorsOrigins)));
+app.use(express.json({ limit: "2mb" }));
+
+function requestLogBase(req) {
   return {
-    credentials: true,
-    origin(origin, callback) {
-      if (!origin || isAllowedOrigin(origin)) return callback(null, true);
-      return callback(new Error(`CORS origin not allowed: ${origin}`));
-    },
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl || req.url,
+    userId: req.user?.id || null,
+    visitorId: req.visitorId || null,
   };
 }
 
-app.use(cors(createCorsOptions()));
-app.use(express.json({ limit: "2mb" }));
+function requestBodyForLog(req) {
+  const method = String(req.method || "").toUpperCase();
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) return undefined;
+  if (!req.is?.("application/json")) return undefined;
+  return req.body && typeof req.body === "object" ? req.body : undefined;
+}
+
+app.use((req, res, next) => {
+  const startedAt = performance.now();
+  req.requestId = req.get("x-request-id") || createRequestId();
+  res.setHeader("X-Request-Id", req.requestId);
+  req.logStep = (event, details = {}) => {
+    logInfo(event, {
+      ...requestLogBase(req),
+      ...details,
+    });
+  };
+
+  logInfo("request_started", {
+    ...requestLogBase(req),
+    query: req.query,
+    body: requestBodyForLog(req),
+    contentType: req.get("content-type") || "",
+    contentLength: req.get("content-length") || "",
+  });
+
+  res.on("finish", () => {
+    const statusCode = res.statusCode;
+    const log = statusCode >= 500 ? logError : statusCode >= 400 ? logWarn : logInfo;
+    log("request_finished", {
+      ...requestLogBase(req),
+      statusCode,
+      durationMs: Math.round(performance.now() - startedAt),
+    });
+  });
+
+  next();
+});
 
 const SESSION_COOKIE_NAME = "qimoshua_session";
 const SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_DAYS || 30);
@@ -333,12 +376,18 @@ async function getPracticeSources({ visitorId, subjectId, amount, types }) {
   return sources;
 }
 
-async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
+async function getOrGenerateQuestions({ visitorId, subjectId, types, amount, logStep = null }) {
   const startedAt = performance.now();
   const safeAmount = Math.min(50, Math.max(1, Number(amount) || 5));
   const requestedTypes = Array.isArray(types) && types.length ? types : ["single"];
   const sources = await getPracticeSources({ visitorId, subjectId, amount: safeAmount, types: requestedTypes });
   const retrievedAt = performance.now();
+  logStep?.("questions_sources_loaded", {
+    subjectId,
+    requestedAmount: safeAmount,
+    requestedTypes,
+    sourceCount: sources.length,
+  });
   const documentHashes = store.getDocumentHashesForSubject ? await store.getDocumentHashesForSubject({ visitorId, subjectId }) : [];
   const priorQuestions = store.getPriorQuestionsByDocumentHashes
     ? await store.getPriorQuestionsByDocumentHashes({ visitorId, documentHashes, types: requestedTypes, limit: 500 })
@@ -347,6 +396,12 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
     ? await store.getRecentQuestions({ visitorId, subjectId, types: requestedTypes, limit: 500 })
     : [];
   const historyLoadedAt = performance.now();
+  logStep?.("questions_history_loaded", {
+    subjectId,
+    documentHashCount: documentHashes.length,
+    priorQuestionCount: priorQuestions.length,
+    currentSubjectQuestionCount: currentSubjectQuestions.length,
+  });
   const questions = await generateQuestionsFromSources({
     sources,
     types: requestedTypes,
@@ -354,6 +409,10 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
     excludedQuestions: [...priorQuestions, ...currentSubjectQuestions],
   });
   const generatedAt = performance.now();
+  logStep?.("questions_ai_generated", {
+    subjectId,
+    generatedQuestionCount: questions.length,
+  });
   const savedQuestions = prepareQuestionsForImmediateReturn({
     questions,
     subjectId,
@@ -361,7 +420,7 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
   });
   void store
     .saveQuestions({ visitorId, subjectId, questions: savedQuestions, documentHash: documentHashes[0] || null })
-    .catch((error) => console.error("background save failed:", error));
+    .catch((error) => logError("background_save_failed", { visitorId, subjectId, error }));
   const savedAt = performance.now();
   const timings = {
     retrievalMs: Math.round(retrievedAt - startedAt),
@@ -371,10 +430,14 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount }) {
     totalMs: Math.round(savedAt - startedAt),
   };
 
-  console.log(
-    `[questions] subject=${subjectId} amount=${safeAmount} types=${requestedTypes.join(",")} sources=${sources.length} ` +
-      `retrieval=${timings.retrievalMs}ms history=${timings.historyMs}ms generation=${timings.generationMs}ms save=${timings.saveMs}ms total=${timings.totalMs}ms`,
-  );
+  logInfo("questions_generated", {
+    subjectId,
+    requestedAmount: safeAmount,
+    requestedTypes,
+    sourceCount: sources.length,
+    generatedQuestionCount: savedQuestions.length,
+    timings,
+  });
 
   return {
     questions: savedQuestions,
@@ -391,10 +454,25 @@ app.get("/api/health", async (req, res, next) => {
       ok: true,
       service: "qimoshua-rag-api",
       mode: useMemoryStore || !process.env.DATABASE_URL ? "memory" : "database",
+      build: DEPLOY_VERSION,
     });
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/debug/cors", (req, res) => {
+  const origin = String(req.query?.origin || req.get("origin") || "").trim();
+  res.json({
+    build: DEPLOY_VERSION,
+    origin,
+    configuredOrigins: configuredCorsOrigins,
+    computedHeaders: corsHeadersForRequest({
+      origin,
+      requestHeaders: "content-type,x-visitor-id",
+      configuredOrigins: configuredCorsOrigins,
+    }),
+  });
 });
 
 app.post("/api/auth/register", async (req, res, next) => {
@@ -402,6 +480,7 @@ app.post("/api/auth/register", async (req, res, next) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
     const nickname = String(req.body?.nickname || "").trim();
+    req.logStep("auth_register_requested", { email, hasNickname: Boolean(nickname) });
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "请输入有效邮箱。" });
@@ -416,6 +495,7 @@ app.post("/api/auth/register", async (req, res, next) => {
       nickname: nickname.slice(0, 30) || email.split("@")[0],
     });
     await createLoginSession(req, res, user);
+    req.logStep("auth_register_completed", { userId: user.id, email });
     res.status(201).json({ user: publicUser(user) });
   } catch (error) {
     if (error?.code === "23505") {
@@ -429,13 +509,16 @@ app.post("/api/auth/login", async (req, res, next) => {
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
+    req.logStep("auth_login_requested", { email });
     const user = await store.getUserByEmail(email);
 
     if (!user || !verifyPassword(password, user.password_hash)) {
+      req.logStep("auth_login_rejected", { email, reason: "invalid_credentials" });
       return res.status(401).json({ error: "邮箱或密码不正确。" });
     }
 
     await createLoginSession(req, res, user);
+    req.logStep("auth_login_completed", { userId: user.id, email });
     res.json({ user: publicUser(user) });
   } catch (error) {
     next(error);
@@ -447,6 +530,7 @@ app.post("/api/auth/logout", async (req, res, next) => {
     const token = parseCookies(req.get("cookie"))[SESSION_COOKIE_NAME];
     if (token) await store.deleteAuthSession(hashSessionToken(token));
     res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+    req.logStep("auth_logout_completed", { hadToken: Boolean(token) });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -466,6 +550,7 @@ app.post("/api/subjects", async (req, res, next) => {
     if (!name) return res.status(400).json({ error: "Subject name is required." });
 
     const subject = await store.createSubject({ visitorId: req.visitorId, name });
+    req.logStep("subject_created", { subjectId: subject.id, name });
     res.status(201).json(subject);
   } catch (error) {
     next(error);
@@ -474,7 +559,9 @@ app.post("/api/subjects", async (req, res, next) => {
 
 app.get("/api/subjects", async (req, res, next) => {
   try {
-    res.json(await store.listSubjects({ visitorId: req.visitorId }));
+    const subjects = await store.listSubjects({ visitorId: req.visitorId });
+    req.logStep("subjects_listed", { subjectCount: subjects.length });
+    res.json(subjects);
   } catch (error) {
     next(error);
   }
@@ -484,7 +571,36 @@ app.get("/api/subjects/:subjectId", async (req, res, next) => {
   try {
     const subject = await store.getSubject({ visitorId: req.visitorId, subjectId: req.params.subjectId });
     if (!subject) return res.status(404).json({ error: "Subject not found." });
+    req.logStep("subject_loaded", { subjectId: req.params.subjectId });
     res.json(subject);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/subjects/:subjectId/questions", async (req, res, next) => {
+  try {
+    if (!store.listQuestionsForSubject) return res.json([]);
+    const limit = Math.min(500, Math.max(1, Number(req.query?.limit || 500)));
+    const questions = await store.listQuestionsForSubject({ visitorId: req.visitorId, subjectId: req.params.subjectId, limit });
+    req.logStep("subject_questions_listed", { subjectId: req.params.subjectId, questionCount: questions.length, limit });
+    res.json(questions);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/subjects/:subjectId/questions/:questionId", async (req, res, next) => {
+  try {
+    if (!store.deleteQuestionForSubject) return res.status(501).json({ error: "Question deletion is not available." });
+    const deleted = await store.deleteQuestionForSubject({
+      visitorId: req.visitorId,
+      subjectId: req.params.subjectId,
+      questionId: req.params.questionId,
+    });
+    if (!deleted) return res.status(404).json({ error: "Question not found." });
+    req.logStep("subject_question_deleted", { subjectId: req.params.subjectId, questionId: req.params.questionId });
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }
@@ -494,6 +610,7 @@ app.delete("/api/subjects/:subjectId", async (req, res, next) => {
   try {
     const deleted = await store.deleteSubject({ visitorId: req.visitorId, subjectId: req.params.subjectId });
     if (!deleted) return res.status(404).json({ error: "Subject not found." });
+    req.logStep("subject_deleted", { subjectId: req.params.subjectId });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -506,14 +623,33 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res, next) 
     const subjectId = String(req.body?.subjectId || "").trim();
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
     if (!req.file) return res.status(400).json({ error: "file is required." });
+    req.logStep("upload_received", {
+      subjectId,
+      fileName: repairMojibake(req.file.originalname),
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+    });
 
     const text = await extractTextFromFile(req.file);
     const extractedAt = performance.now();
+    req.logStep("upload_text_extracted", {
+      subjectId,
+      textLength: text.length,
+    });
     const contentHash = createContentHash(text);
     const chunks = chunkText(text, { chunkSize: Number(process.env.DOC_CHUNK_SIZE || 800) });
     const chunkedAt = performance.now();
+    req.logStep("upload_text_chunked", {
+      subjectId,
+      chunkCount: chunks.length,
+      contentHash,
+    });
     const embeddings = await embedTexts(chunks.map((chunk) => chunk.text));
     const embeddedAt = performance.now();
+    req.logStep("upload_embeddings_created", {
+      subjectId,
+      embeddingCount: embeddings.length,
+    });
 
     const document = await store.createDocument({
       visitorId: req.visitorId,
@@ -535,6 +671,11 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res, next) 
       })),
     });
     const savedAt = performance.now();
+    req.logStep("upload_saved", {
+      subjectId,
+      documentId: document.id,
+      savedChunkCount: savedChunks.length,
+    });
     const timings = {
       extractMs: Math.round(extractedAt - startedAt),
       chunkMs: Math.round(chunkedAt - extractedAt),
@@ -543,10 +684,14 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res, next) 
       totalMs: Math.round(savedAt - startedAt),
     };
 
-    console.log(
-      `[upload] file="${repairMojibake(req.file.originalname)}" chars=${text.length} chunks=${chunks.length} ` +
-        `extract=${timings.extractMs}ms chunk=${timings.chunkMs}ms embedding=${timings.embeddingMs}ms save=${timings.saveMs}ms total=${timings.totalMs}ms`,
-    );
+    logInfo("upload_completed", {
+      ...requestLogBase(req),
+      subjectId,
+      fileName: repairMojibake(req.file.originalname),
+      textLength: text.length,
+      chunkCount: chunks.length,
+      timings,
+    });
 
     res.status(201).json({
       document,
@@ -569,9 +714,15 @@ app.post("/api/retrieval/search", async (req, res, next) => {
     const limit = Number(req.body?.limit || 5);
 
     if (!subjectId || !query) return res.status(400).json({ error: "subjectId and query are required." });
+    req.logStep("retrieval_search_requested", { subjectId, query, limit });
 
     const [queryEmbedding] = await embedTexts([query]);
     const matches = await store.searchChunks({ visitorId: req.visitorId, subjectId, queryEmbedding, limit });
+    req.logStep("retrieval_search_completed", {
+      subjectId,
+      matchCount: matches.length,
+      topScore: matches[0]?.score ?? null,
+    });
 
     res.json({
       query,
@@ -590,7 +741,15 @@ app.post("/api/retrieval/search", async (req, res, next) => {
 app.post("/api/audio/transcribe", upload.single("audio"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "audio is required." });
-    res.json(await transcribeAudioFile(req.file));
+    req.logStep("audio_transcribe_requested", {
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+    });
+    const result = await transcribeAudioFile(req.file);
+    req.logStep("audio_transcribe_completed", {
+      textLength: String(result?.text || "").length,
+    });
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -604,7 +763,7 @@ app.post("/api/questions/generate", async (req, res, next) => {
 
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
 
-    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
+    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount, logStep: req.logStep });
     res.json(result);
   } catch (error) {
     next(error);
@@ -620,13 +779,19 @@ app.post("/api/sessions", async (req, res, next) => {
 
     if (!subjectId) return res.status(400).json({ error: "subjectId is required." });
 
-    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount });
+    req.logStep("session_create_requested", { subjectId, types, amount, mode });
+    const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount, logStep: req.logStep });
     const session = createSessionPayload({ subjectId, mode, questions: result.questions });
     if (store.createPracticeSession) {
       void store
         .createPracticeSession({ visitorId: req.visitorId, session })
-        .catch((error) => console.error("background save failed:", error));
+        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), subjectId, sessionId: session.id, error }));
     }
+    req.logStep("session_create_completed", {
+      subjectId,
+      sessionId: session.id,
+      questionCount: session.questions.length,
+    });
     res.status(201).json(session);
   } catch (error) {
     next(error);
@@ -651,8 +816,13 @@ app.post("/api/sessions/retry", async (req, res, next) => {
     if (store.createPracticeSession) {
       void store
         .createPracticeSession({ visitorId: req.visitorId, session })
-        .catch((error) => console.error("background save failed:", error));
+        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), subjectId, sessionId: session.id, error }));
     }
+    req.logStep("retry_session_created", {
+      subjectId,
+      sessionId: session.id,
+      questionCount: questions.length,
+    });
     res.status(201).json(session);
   } catch (error) {
     next(error);
@@ -664,6 +834,7 @@ app.get("/api/sessions/:sessionId", async (req, res, next) => {
     if (!store.getPracticeSession) return res.status(404).json({ error: "Session not found." });
     const session = await store.getPracticeSession({ visitorId: req.visitorId, sessionId: req.params.sessionId });
     if (!session) return res.status(404).json({ error: "Session not found." });
+    req.logStep("session_loaded", { sessionId: req.params.sessionId, questionCount: session.questions?.length || 0 });
     res.json(session);
   } catch (error) {
     next(error);
@@ -678,6 +849,7 @@ app.delete("/api/sessions/:sessionId/answers/:questionId", async (req, res, next
       sessionId: req.params.sessionId,
       questionId: req.params.questionId,
     });
+    req.logStep("session_answer_deleted", { sessionId: req.params.sessionId, questionId: req.params.questionId });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -700,6 +872,14 @@ app.post("/api/answers/grade", async (req, res, next) => {
         ? gradeSingleAnswer({ question, answer })
         : await gradeSubjectiveAnswer({ question, answer, mode });
     const gradedAt = performance.now();
+    req.logStep("answer_graded", {
+      sessionId: sessionId || null,
+      questionId: question.id,
+      questionType: question.type,
+      mode,
+      isCorrect: result.isCorrect,
+      accuracy: result.accuracy ?? null,
+    });
 
     let savedAnswer = null;
     if (sessionId && store.saveAnswer) {
@@ -711,14 +891,19 @@ app.post("/api/answers/grade", async (req, res, next) => {
           answer,
           result,
         })
-        .catch((error) => console.error("background save failed:", error));
+        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), sessionId, questionId: question.id, error }));
     }
     const savedAt = performance.now();
 
-    console.log(
-      `[grade] session=${sessionId || "none"} question=${question.id} type=${question.type} ` +
-        `grade=${Math.round(gradedAt - startedAt)}ms save=${Math.round(savedAt - gradedAt)}ms total=${Math.round(savedAt - startedAt)}ms`,
-    );
+    logInfo("grade_completed", {
+      ...requestLogBase(req),
+      sessionId: sessionId || null,
+      questionId: question.id,
+      questionType: question.type,
+      gradeMs: Math.round(gradedAt - startedAt),
+      saveMs: Math.round(savedAt - gradedAt),
+      totalMs: Math.round(savedAt - startedAt),
+    });
 
     res.json({ result, answerId: savedAnswer?.id || null, createdAt: savedAnswer?.createdAt || null });
   } catch (error) {
@@ -743,6 +928,7 @@ app.post("/api/sessions/:sessionId/finish", async (req, res, next) => {
         summary,
       });
     }
+    req.logStep("session_finished", { sessionId: req.params.sessionId, summary });
     res.json({ summary });
   } catch (error) {
     next(error);
@@ -753,7 +939,9 @@ app.get("/api/mistakes", async (req, res, next) => {
   try {
     const subjectId = String(req.query?.subjectId || "").trim();
     if (!store.listMistakes) return res.json([]);
-    res.json(await store.listMistakes({ visitorId: req.visitorId, subjectId }));
+    const mistakes = await store.listMistakes({ visitorId: req.visitorId, subjectId });
+    req.logStep("mistakes_listed", { subjectId: subjectId || null, mistakeCount: mistakes.length });
+    res.json(mistakes);
   } catch (error) {
     next(error);
   }
@@ -764,6 +952,7 @@ app.delete("/api/mistakes/:mistakeId", async (req, res, next) => {
     if (!store.deleteMistake) return res.status(404).json({ error: "Mistake not found." });
     const deleted = await store.deleteMistake({ visitorId: req.visitorId, mistakeId: req.params.mistakeId });
     if (!deleted) return res.status(404).json({ error: "Mistake not found." });
+    req.logStep("mistake_deleted", { mistakeId: req.params.mistakeId });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -773,7 +962,13 @@ app.delete("/api/mistakes/:mistakeId", async (req, res, next) => {
 app.get("/api/admin/metrics", requireAdmin, async (req, res, next) => {
   try {
     if (!store.getAdminMetrics) return res.status(501).json({ error: "Metrics store is not available." });
-    res.json(await store.getAdminMetrics());
+    const metrics = await store.getAdminMetrics();
+    req.logStep("admin_metrics_loaded", {
+      totalUsers: metrics?.totals?.users ?? null,
+      totalSubjects: metrics?.totals?.subjects ?? null,
+      totalSessions: metrics?.totals?.sessions ?? null,
+    });
+    res.json(metrics);
   } catch (error) {
     next(error);
   }
@@ -783,7 +978,9 @@ app.get("/api/admin/events", requireAdmin, async (req, res, next) => {
   try {
     const limit = Number(req.query?.limit || 50);
     if (!store.listAdminEvents) return res.json([]);
-    res.json(await store.listAdminEvents({ limit }));
+    const events = await store.listAdminEvents({ limit });
+    req.logStep("admin_events_loaded", { limit, eventCount: events.length });
+    res.json(events);
   } catch (error) {
     next(error);
   }
@@ -803,6 +1000,11 @@ app.post("/api/analytics/events", async (req, res, next) => {
         userAgent: req.get("user-agent"),
       });
     }
+    req.logStep("analytics_event_saved", {
+      eventName,
+      sessionId: String(req.body?.sessionId || "").slice(0, 120),
+      pagePath: String(req.body?.pagePath || "").slice(0, 300),
+    });
     res.status(202).json({ ok: true });
   } catch (error) {
     next(error);
@@ -810,7 +1012,13 @@ app.post("/api/analytics/events", async (req, res, next) => {
 });
 
 app.use((error, req, res, next) => {
-  console.error(error);
+  const statusCode =
+    error?.code === "LIMIT_FILE_SIZE" ? 413 : isTransientBackendError(error) ? 503 : error?.statusCode || error?.status || 500;
+  logError("request_failed", {
+    ...requestLogBase(req),
+    statusCode,
+    error,
+  });
   if (error?.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({
       error: `File is too large. Please upload a file smaller than ${uploadLimitMb} MB.`,
@@ -831,5 +1039,5 @@ const server = http.createServer(app);
 setupQwenRealtimeAsr(server);
 
 server.listen(port, () => {
-  console.log(`RAG API listening on http://localhost:${port}`);
+  logInfo("server_started", { port, url: `http://localhost:${port}` });
 });

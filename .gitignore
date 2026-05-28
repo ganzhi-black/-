@@ -37,6 +37,7 @@ coverage/
 *.xlsx
 *.pdf
 *.svg
+*.zip
 
 # Separate frontend deployment bundle
 .railway-frontend/

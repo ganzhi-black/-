@@ -136,6 +136,7 @@ app.use((req, res, next) => {
 const SESSION_COOKIE_NAME = "qimoshua_session";
 const SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_DAYS || 30);
 const PASSWORD_MIN_LENGTH = 8;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function parseCookies(cookieHeader = "") {
   return Object.fromEntries(
@@ -222,6 +223,17 @@ function visitorIdsForClaim(req) {
   return [...new Set(rawIds.map((id) => String(id || "").trim()).filter(Boolean))].slice(0, 10);
 }
 
+function subjectIdsForClaim(req) {
+  return [
+    ...new Set(
+      String(req.get("x-claim-subject-ids") || "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => UUID_PATTERN.test(id)),
+    ),
+  ].slice(0, 20);
+}
+
 async function createLoginSession(req, res, user) {
   await claimVisitorDataForUser(req, user.id);
 
@@ -252,6 +264,20 @@ async function claimVisitorDataForUser(req, userId) {
           counts: claimResult.counts || {},
         });
       }
+    }
+  }
+  if (store.claimSubjectData) {
+    const claimResult = await store.claimSubjectData({
+      subjectIds: subjectIdsForClaim(req),
+      userId,
+    });
+    if (claimResult?.claimed) {
+      req.logStep?.("subject_data_claimed", {
+        userId,
+        subjectIds: claimResult.subjectIds || [],
+        previousUserIds: claimResult.previousUserIds || [],
+        counts: claimResult.counts || {},
+      });
     }
   }
 }

@@ -90,3 +90,19 @@ test("re-login can still claim records after the primary visitor id was replaced
   assert.match(server, /req\.get\("x-visitor-aliases"\)/);
   assert.match(server, /for \(const visitorId of visitorIdsForClaim\(req\)\)/);
 });
+
+test("re-login can recover visitor records by cached subject ids when the old visitor id is gone", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const memoryStore = readFileSync("server/services/memoryStore.js", "utf8");
+  const apiService = readFileSync("src/services/api.js", "utf8");
+
+  assert.match(apiService, /function getClaimSubjectIds\(\)/);
+  assert.match(apiService, /headers\.set\("X-Claim-Subject-Ids", getClaimSubjectIds\(\)\.join\(","\)\)/);
+  assert.match(server, /function subjectIdsForClaim\(req\)/);
+  assert.match(server, /req\.get\("x-claim-subject-ids"\)/);
+  assert.match(server, /await store\.claimSubjectData\(\{\s*subjectIds: subjectIdsForClaim\(req\),\s*userId,\s*\}\)/);
+  assert.match(dbStore, /async claimSubjectData\(\{ subjectIds, userId \}\)/);
+  assert.match(dbStore, /u\.nickname like 'visitor:%'/);
+  assert.match(memoryStore, /claimSubjectData\(\{ subjectIds, userId \}\)/);
+});

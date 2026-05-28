@@ -294,6 +294,77 @@ export async function createDbStore(databaseUrl) {
       }
     },
 
+    async claimSubjectData({ subjectIds, userId }) {
+      const validSubjectIds = [...new Set((subjectIds || []).filter((id) => isUuid(id)))];
+      if (!validSubjectIds.length || !userId) return { claimed: false };
+
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const ownerResult = await client.query(
+          `
+            select distinct s.user_id
+            from subjects s
+            join users u on u.id = s.user_id
+            where s.id = any($1::uuid[])
+              and s.user_id <> $2
+              and (u.email is null or u.email = '' or u.nickname like 'visitor:%')
+          `,
+          [validSubjectIds, userId],
+        );
+        const previousUserIds = ownerResult.rows.map((row) => row.user_id).filter(Boolean);
+        if (!previousUserIds.length) {
+          await client.query("commit");
+          return { claimed: false };
+        }
+
+        await client.query(
+          `
+            delete from mistakes visitor_mistakes
+            using mistakes account_mistakes
+            where visitor_mistakes.user_id = any($2::uuid[])
+              and visitor_mistakes.subject_id = any($3::uuid[])
+              and account_mistakes.user_id = $1
+              and account_mistakes.question_id = visitor_mistakes.question_id
+          `,
+          [userId, previousUserIds, validSubjectIds],
+        );
+
+        const counts = {};
+        const subjectResult = await client.query(
+          "update subjects set user_id = $1 where user_id = any($2::uuid[]) and id = any($3::uuid[])",
+          [userId, previousUserIds, validSubjectIds],
+        );
+        counts.subjects = subjectResult.rowCount;
+
+        const subjectScopedTables = ["documents", "document_chunks", "questions", "practice_sessions", "answers", "mistakes"];
+
+        for (const tableName of subjectScopedTables) {
+          const result = await client.query(
+            `update ${tableName} set user_id = $1 where user_id = any($2::uuid[]) and subject_id = any($3::uuid[])`,
+            [userId, previousUserIds, validSubjectIds],
+          );
+          counts[tableName] = result.rowCount;
+        }
+
+        const analyticsResult = await client.query("update analytics_events set user_id = $1 where user_id = any($2::uuid[])", [userId, previousUserIds]);
+        counts.analytics_events = analyticsResult.rowCount;
+
+        await client.query("commit");
+        return {
+          claimed: Object.values(counts).some((count) => count > 0),
+          subjectIds: validSubjectIds,
+          previousUserIds,
+          counts,
+        };
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
     async createUser({ email, passwordHash, nickname }) {
       const normalizedEmail = String(email || "").trim().toLowerCase();
       const result = await pool.query(

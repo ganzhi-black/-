@@ -81,6 +81,17 @@ function getVisitorAliases(primaryVisitorId = getVisitorId()) {
   return [...new Set([primaryVisitorId, ...readVisitorAliases()].filter(Boolean).map(String))].slice(0, MAX_VISITOR_ALIAS_COUNT);
 }
 
+function getClaimSubjectIds() {
+  const state = loadState();
+  const ids = [
+    ...(state.subjects || []).map((subject) => subject.id),
+    ...(state.sessions || []).map((session) => session.subjectId),
+    ...(state.answers || []).map((answer) => answer.subjectId),
+    ...(state.mistakes || []).flatMap((mistake) => [mistake.subjectId, mistake.question?.subjectId]),
+  ];
+  return [...new Set(ids.filter(Boolean).map(String))].slice(0, 20);
+}
+
 function setVisitorId(visitorId) {
   try {
     const previous = window.localStorage.getItem(VISITOR_ID_KEY);
@@ -101,6 +112,7 @@ async function requestOnce(path, options = {}) {
   const visitorId = getVisitorId();
   headers.set("X-Visitor-Id", visitorId);
   headers.set("X-Visitor-Aliases", getVisitorAliases(visitorId).join(","));
+  headers.set("X-Claim-Subject-Ids", getClaimSubjectIds().join(","));
   const timeoutMs = Number(options.timeoutMs || 0);
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;

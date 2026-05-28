@@ -49,4 +49,5 @@ test("corsHeadersForRequest default headers allow visitor aliases for account da
 
   assert.match(headers["Access-Control-Allow-Headers"], /X-Visitor-Id/);
   assert.match(headers["Access-Control-Allow-Headers"], /X-Visitor-Aliases/);
+  assert.match(headers["Access-Control-Allow-Headers"], /X-Claim-Subject-Ids/);
 });

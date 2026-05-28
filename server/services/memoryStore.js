@@ -44,6 +44,23 @@ export function createMemoryStore() {
       return { claimed: claimedCount > 0, counts: { records: claimedCount } };
     },
 
+    claimSubjectData({ subjectIds, userId }) {
+      const subjectIdSet = new Set((subjectIds || []).filter(Boolean));
+      if (!subjectIdSet.size || !userId) return { claimed: false };
+
+      const collections = [subjects, documents, chunks, savedQuestions, practiceSessions, answers, mistakes];
+      let claimedCount = 0;
+      for (const collection of collections) {
+        for (const item of collection) {
+          if (subjectIdSet.has(item.subjectId || item.id) && item.visitorId !== userId) {
+            item.visitorId = userId;
+            claimedCount += 1;
+          }
+        }
+      }
+      return { claimed: claimedCount > 0, subjectIds: [...subjectIdSet], counts: { records: claimedCount } };
+    },
+
     createUser({ email, passwordHash, nickname }) {
       const normalizedEmail = String(email || "").trim().toLowerCase();
       if (users.some((user) => user.email === normalizedEmail)) {

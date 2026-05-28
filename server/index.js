@@ -219,7 +219,7 @@ function sessionCookieOptions() {
 }
 
 function visitorIdsForClaim(req) {
-  const rawIds = [req.get("x-visitor-id"), ...String(req.get("x-visitor-aliases") || "").split(",")];
+  const rawIds = [req.authSessionId, req.get("x-visitor-id"), ...String(req.get("x-visitor-aliases") || "").split(",")];
   return [...new Set(rawIds.map((id) => String(id || "").trim()).filter(Boolean))].slice(0, 10);
 }
 
@@ -310,6 +310,7 @@ async function resolveAuth(req, res, next) {
     if (token) {
       const session = await store.getAuthSession(hashSessionToken(token));
       if (session) {
+        req.authSessionId = session.session_id;
         req.user = publicUser(session);
         req.visitorId = req.user.id;
         await claimVisitorDataForUser(req, req.user.id);

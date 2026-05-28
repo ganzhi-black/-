@@ -168,6 +168,16 @@ test("auth sessions expose the account user id instead of the session id", () =>
   assert.match(memoryStoreSource, /id:\s*user\.id,\s*\n\s*session_id:\s*session\.id/);
 });
 
+test("authenticated requests claim data stranded under the previous auth session id", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const visitorIdsForClaimBlock = sourceBlock(server, "function visitorIdsForClaim(req)", "function subjectIdsForClaim");
+  const resolveAuthBlock = sourceBlock(server, "async function resolveAuth", "function requireAuth");
+
+  assert.match(resolveAuthBlock, /req\.authSessionId\s*=\s*session\.session_id/);
+  assert.match(visitorIdsForClaimBlock, /req\.authSessionId/);
+  assert.match(resolveAuthBlock, /await claimVisitorDataForUser\(req, req\.user\.id\)/);
+});
+
 test("server-backed account reads are scoped by resolved user_id", () => {
   const dbStore = readFileSync("server/services/dbStore.js", "utf8");
   const readMethods = [

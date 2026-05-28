@@ -1,4 +1,4 @@
-const DEFAULT_ALLOWED_HEADERS = "Content-Type, X-Visitor-Id";
+const DEFAULT_ALLOWED_HEADERS = "Content-Type, X-Visitor-Id, X-Visitor-Aliases";
 const DEFAULT_ALLOWED_METHODS = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://qimoshua-li7dtcdmw-ganzhi-blacks-projects.vercel.app",

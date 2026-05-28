@@ -217,6 +217,11 @@ function sessionCookieOptions() {
   };
 }
 
+function visitorIdsForClaim(req) {
+  const rawIds = [req.get("x-visitor-id"), ...String(req.get("x-visitor-aliases") || "").split(",")];
+  return [...new Set(rawIds.map((id) => String(id || "").trim()).filter(Boolean))].slice(0, 10);
+}
+
 async function createLoginSession(req, res, user) {
   await claimVisitorDataForUser(req, user.id);
 
@@ -234,16 +239,19 @@ async function createLoginSession(req, res, user) {
 
 async function claimVisitorDataForUser(req, userId) {
   if (store.claimVisitorData) {
-    const claimResult = await store.claimVisitorData({
-      visitorId: req.get("x-visitor-id"),
-      userId,
-    });
-    if (claimResult?.claimed) {
-      req.logStep?.("visitor_data_claimed", {
+    for (const visitorId of visitorIdsForClaim(req)) {
+      const claimResult = await store.claimVisitorData({
+        visitorId,
         userId,
-        visitorUserId: claimResult.visitorUserId || null,
-        counts: claimResult.counts || {},
       });
+      if (claimResult?.claimed) {
+        req.logStep?.("visitor_data_claimed", {
+          userId,
+          visitorId,
+          visitorUserId: claimResult.visitorUserId || null,
+          counts: claimResult.counts || {},
+        });
+      }
     }
   }
 }

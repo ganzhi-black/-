@@ -62,7 +62,7 @@ test("login and register claim existing visitor-owned study data for the account
 
   assert.match(memoryStore, /claimVisitorData\(\{ visitorId, userId \}\)/);
   assert.match(server, /async function claimVisitorDataForUser\(req, userId\)/);
-  assert.match(server, /await store\.claimVisitorData\(\{\s*visitorId: req\.get\("x-visitor-id"\),\s*userId,\s*\}\)/);
+  assert.match(server, /await store\.claimVisitorData\(\{\s*visitorId,\s*userId,\s*\}\)/);
   assert.match(server, /await claimVisitorDataForUser\(req, user\.id\)/);
 });
 
@@ -74,4 +74,19 @@ test("already-authenticated sessions also claim visitor data and then send the a
   assert.match(apiService, /function setVisitorId\(visitorId\)/);
   assert.match(apiService, /function rememberAuthenticatedUser\(user\)/);
   assert.match(apiService, /return rememberAuthenticatedUser\(payload\.user\)/g);
+});
+
+test("re-login can still claim records after the primary visitor id was replaced by the account id", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const apiService = readFileSync("src/services/api.js", "utf8");
+
+  assert.match(apiService, /const VISITOR_ALIAS_KEY = "qimoshua:visitor-id-history"/);
+  assert.match(apiService, /function rememberVisitorAlias\(visitorId\)/);
+  assert.match(apiService, /function getVisitorAliases\(primaryVisitorId = getVisitorId\(\)\)/);
+  assert.match(apiService, /headers\.set\("X-Visitor-Aliases", getVisitorAliases\(visitorId\)\.join\(","\)\)/);
+  assert.match(apiService, /rememberVisitorAlias\(previous\)/);
+
+  assert.match(server, /function visitorIdsForClaim\(req\)/);
+  assert.match(server, /req\.get\("x-visitor-aliases"\)/);
+  assert.match(server, /for \(const visitorId of visitorIdsForClaim\(req\)\)/);
 });

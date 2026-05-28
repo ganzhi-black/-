@@ -40,3 +40,13 @@ test("corsHeadersForRequest 在通配配置下会反射请求来源并允许凭�
   assert.equal(headers["Access-Control-Allow-Headers"], "content-type,x-visitor-id");
   assert.equal(headers.Vary, "Origin");
 });
+
+test("corsHeadersForRequest default headers allow visitor aliases for account data recovery", () => {
+  const headers = corsHeadersForRequest({
+    origin: "https://qimoshua-li7dtcdmw-ganzhi-blacks-projects.vercel.app",
+    configuredOrigins: effectiveCorsOrigins("*"),
+  });
+
+  assert.match(headers["Access-Control-Allow-Headers"], /X-Visitor-Id/);
+  assert.match(headers["Access-Control-Allow-Headers"], /X-Visitor-Aliases/);
+});

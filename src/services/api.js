@@ -33,6 +33,8 @@ function localApiBaseUrl() {
 export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE_URL : localApiBaseUrl());
 const configuredRealtimeAsrUrl = normalizeConfiguredUrl(import.meta.env.VITE_REALTIME_ASR_URL);
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
+const VISITOR_ALIAS_KEY = "qimoshua:visitor-id-history";
+const MAX_VISITOR_ALIAS_COUNT = 8;
 
 function createVisitorId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -52,8 +54,37 @@ function getVisitorId() {
   }
 }
 
+function readVisitorAliases() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(VISITOR_ALIAS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeVisitorAliases(visitorIds) {
+  try {
+    const uniqueIds = [...new Set(visitorIds.filter(Boolean).map(String))].slice(0, MAX_VISITOR_ALIAS_COUNT);
+    window.localStorage.setItem(VISITOR_ALIAS_KEY, JSON.stringify(uniqueIds));
+  } catch {
+    // Storage is best-effort; the current request still carries X-Visitor-Id.
+  }
+}
+
+function rememberVisitorAlias(visitorId) {
+  if (!visitorId) return;
+  writeVisitorAliases([visitorId, ...readVisitorAliases()]);
+}
+
+function getVisitorAliases(primaryVisitorId = getVisitorId()) {
+  return [...new Set([primaryVisitorId, ...readVisitorAliases()].filter(Boolean).map(String))].slice(0, MAX_VISITOR_ALIAS_COUNT);
+}
+
 function setVisitorId(visitorId) {
   try {
+    const previous = window.localStorage.getItem(VISITOR_ID_KEY);
+    if (previous && previous !== visitorId) rememberVisitorAlias(previous);
     if (visitorId) window.localStorage.setItem(VISITOR_ID_KEY, visitorId);
   } catch {
     // Ignore storage failures; the auth cookie still identifies the account.
@@ -67,7 +98,9 @@ function rememberAuthenticatedUser(user) {
 
 async function requestOnce(path, options = {}) {
   const headers = new Headers(options.headers || {});
-  headers.set("X-Visitor-Id", getVisitorId());
+  const visitorId = getVisitorId();
+  headers.set("X-Visitor-Id", visitorId);
+  headers.set("X-Visitor-Aliases", getVisitorAliases(visitorId).join(","));
   const timeoutMs = Number(options.timeoutMs || 0);
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;

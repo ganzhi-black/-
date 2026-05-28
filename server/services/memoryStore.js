@@ -90,7 +90,9 @@ export function createMemoryStore() {
     },
 
     createAuthSession({ userId, tokenHash, expiresAt, userAgent, ipAddress }) {
-      authSessions.push({ id: uid("auth"), user_id: userId, token_hash: tokenHash, expires_at: expiresAt, user_agent: userAgent, ip_address: ipAddress });
+      const session = { id: uid("auth"), user_id: userId, token_hash: tokenHash, expires_at: expiresAt, user_agent: userAgent, ip_address: ipAddress };
+      authSessions.push(session);
+      return session;
     },
 
     getAuthSession(tokenHash) {

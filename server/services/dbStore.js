@@ -412,13 +412,15 @@ export async function createDbStore(databaseUrl) {
     },
 
     async createAuthSession({ userId, tokenHash, expiresAt, userAgent, ipAddress }) {
-      await pool.query(
+      const result = await pool.query(
         `
           insert into auth_sessions (user_id, token_hash, expires_at, user_agent, ip_address)
           values ($1, $2, $3, $4, $5)
+          returning id
         `,
         [userId, tokenHash, expiresAt, userAgent || "", ipAddress || ""],
       );
+      return result.rows[0] || null;
     },
 
     async getAuthSession(tokenHash) {

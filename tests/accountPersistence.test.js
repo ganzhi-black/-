@@ -175,7 +175,26 @@ test("authenticated requests claim data stranded under the previous auth session
 
   assert.match(resolveAuthBlock, /req\.authSessionId\s*=\s*session\.session_id/);
   assert.match(visitorIdsForClaimBlock, /req\.authSessionId/);
-  assert.match(resolveAuthBlock, /await claimVisitorDataForUser\(req, req\.user\.id\)/);
+  assert.match(resolveAuthBlock, /if \(shouldRecoverAuthSessionData\(req\.user\.id, req\.authSessionId\)\) \{\s*await claimVisitorDataForUser\(req, req\.user\.id\);\s*\}/);
+});
+
+test("auth session recovery is not rerun on every authenticated API request", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const createLoginSessionBlock = sourceBlock(server, "async function createLoginSession", "async function claimVisitorDataForUser");
+  const recoveryGuardBlock = sourceBlock(server, "function shouldRecoverAuthSessionData", "async function createLoginSession");
+  const resolveAuthBlock = sourceBlock(server, "async function resolveAuth", "function requireAuth");
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const memoryStore = readFileSync("server/services/memoryStore.js", "utf8");
+
+  assert.match(server, /const recoveredAuthSessionIds = new Set\(\)/);
+  assert.match(recoveryGuardBlock, /recoveredAuthSessionIds\.has\(key\)/);
+  assert.match(server, /recoveredAuthSessionIds\.add\(key\)/);
+  assert.match(resolveAuthBlock, /shouldRecoverAuthSessionData\(req\.user\.id, req\.authSessionId\)/);
+  assert.doesNotMatch(resolveAuthBlock, /req\.visitorId = req\.user\.id;\s*await claimVisitorDataForUser\(req, req\.user\.id\)/);
+  assert.match(createLoginSessionBlock, /const session = await store\.createAuthSession/);
+  assert.match(createLoginSessionBlock, /markAuthSessionRecoveryAttempted\(user\.id, session\?\.id \|\| session\?\.session_id\)/);
+  assert.match(dbStore, /returning id/);
+  assert.match(memoryStore, /return session/);
 });
 
 test("server-backed account reads are scoped by resolved user_id", () => {

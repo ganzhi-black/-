@@ -137,6 +137,8 @@ const SESSION_COOKIE_NAME = "qimoshua_session";
 const SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_DAYS || 30);
 const PASSWORD_MIN_LENGTH = 8;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_RECOVERED_AUTH_SESSION_IDS = 5000;
+const recoveredAuthSessionIds = new Set();
 
 function parseCookies(cookieHeader = "") {
   return Object.fromEntries(
@@ -234,18 +236,39 @@ function subjectIdsForClaim(req) {
   ].slice(0, 20);
 }
 
+function authSessionRecoveryKey(userId, authSessionId) {
+  if (!userId || !authSessionId || String(userId) === String(authSessionId)) return "";
+  return `${userId}:${authSessionId}`;
+}
+
+function markAuthSessionRecoveryAttempted(userId, authSessionId) {
+  const key = authSessionRecoveryKey(userId, authSessionId);
+  if (!key) return;
+  if (recoveredAuthSessionIds.size >= MAX_RECOVERED_AUTH_SESSION_IDS) recoveredAuthSessionIds.clear();
+  recoveredAuthSessionIds.add(key);
+}
+
+function shouldRecoverAuthSessionData(userId, authSessionId) {
+  const key = authSessionRecoveryKey(userId, authSessionId);
+  if (!key) return false;
+  if (recoveredAuthSessionIds.has(key)) return false;
+  markAuthSessionRecoveryAttempted(userId, authSessionId);
+  return true;
+}
+
 async function createLoginSession(req, res, user) {
   await claimVisitorDataForUser(req, user.id);
 
   const token = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
-  await store.createAuthSession({
+  const session = await store.createAuthSession({
     userId: user.id,
     tokenHash: hashSessionToken(token),
     expiresAt,
     userAgent: req.get("user-agent"),
     ipAddress: req.ip,
   });
+  markAuthSessionRecoveryAttempted(user.id, session?.id || session?.session_id);
   res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
 }
 
@@ -313,7 +336,9 @@ async function resolveAuth(req, res, next) {
         req.authSessionId = session.session_id;
         req.user = publicUser(session);
         req.visitorId = req.user.id;
-        await claimVisitorDataForUser(req, req.user.id);
+        if (shouldRecoverAuthSessionData(req.user.id, req.authSessionId)) {
+          await claimVisitorDataForUser(req, req.user.id);
+        }
       }
     }
     next();

@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
 import { api, track } from "../services/api.js";
-import { updateState } from "../services/storage.js";
 
 export default function SummaryPage() {
   const { sessionId } = useParams();
@@ -62,11 +61,6 @@ export default function SummaryPage() {
     const answered = Math.max(Number(session.summary?.answeredCount || 0), Array.isArray(session.answers) ? session.answers.length : 0);
     const skipped = Math.max(Number(session.summary?.skippedCount || 0), new Set(session.skippedQuestionIndexes || []).size);
     if (total > 0 && answered + skipped < total) {
-      const nextIndex = Math.min(total - 1, answered + skipped);
-      updateState((draft) => {
-        const current = draft.sessions.find((item) => item.id === sessionId);
-        if (current) current.currentIndex = nextIndex;
-      });
       navigate(`/quiz/${sessionId}`, { replace: true });
     }
   }, [navigate, session, sessionId]);

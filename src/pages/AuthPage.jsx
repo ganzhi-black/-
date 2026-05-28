@@ -34,6 +34,7 @@ export default function AuthPage({ mode = "login", user, onAuthenticated }) {
         ? await api.register({ email: normalizedEmail, password, nickname: nickname.trim() })
         : await api.login({ email: normalizedEmail, password });
       onAuthenticated(nextUser);
+      await api.refreshAccountData();
       navigate(targetPath, { replace: true });
     } catch (nextError) {
       setError(nextError.message);

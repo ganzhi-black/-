@@ -35,6 +35,11 @@ export function saveState(nextState) {
   window.dispatchEvent(new Event("qimoshua:state-change"));
 }
 
+export function clearState() {
+  localStorage.removeItem(STORAGE_KEY);
+  window.dispatchEvent(new Event("qimoshua:state-change"));
+}
+
 export function updateState(mutator) {
   const current = loadState();
   const draft = structuredClone(current);

@@ -1,9 +1,7 @@
-import { api as mockApi } from "./mockApi.js";
-import { loadState, updateState } from "./storage.js";
+import { clearState, loadState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
 const DEFAULT_PRODUCTION_API_BASE_URL = "https://web-production-60950.up.railway.app";
-const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
 const DEFAULT_RETRY_COUNT = 2;
 const RETRY_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 522, 523, 524]);
 
@@ -267,124 +265,6 @@ function normalizeSession(session) {
   };
 }
 
-function questionsFromLocalSubjectSessions(subjectId) {
-  const state = loadState();
-  const skippedIds = new Set();
-  const questions = [];
-  const seen = new Set();
-
-  for (const session of state.sessions.filter((item) => item.subjectId === subjectId)) {
-    const sessionQuestions = Array.isArray(session.questions) ? session.questions : [];
-    const skippedIndexes = new Set(session.skippedQuestionIndexes || []);
-    sessionQuestions.forEach((question, index) => {
-      if (skippedIndexes.has(index) && question?.id) skippedIds.add(question.id);
-      if (!question?.id || seen.has(question.id)) return;
-      seen.add(question.id);
-      questions.push({
-        ...question,
-        subjectId,
-        createdAt: question.generatedAt || session.createdAt,
-      });
-    });
-  }
-
-  return questions.map((question) => ({
-    ...question,
-    wasSkipped: skippedIds.has(question.id),
-  }));
-}
-
-function mergeSubjectQuestions(remoteQuestions, localQuestions) {
-  const byId = new Map();
-  for (const question of localQuestions) byId.set(question.id, question);
-  for (const question of remoteQuestions) {
-    const local = byId.get(question.id);
-    byId.set(question.id, {
-      ...question,
-      wasSkipped: Boolean(local?.wasSkipped),
-      createdAt: question.createdAt || question.generatedAt || local?.createdAt,
-    });
-  }
-  return [...byId.values()].sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")));
-}
-
-function cachedSession(sessionId) {
-  const session = loadState().sessions.find((item) => item.id === sessionId);
-  return session ? normalizeSession(session) : null;
-}
-
-function storeSession(session, { preserveLocalProgress = false } = {}) {
-  const normalized = normalizeSession(session);
-  updateState((draft) => {
-    const index = draft.sessions.findIndex((item) => item.id === normalized.id);
-    if (index >= 0) {
-      const current = draft.sessions[index];
-      const currentAnswers = Array.isArray(current.answers) ? current.answers : [];
-      const incomingAnswers = Array.isArray(normalized.answers) ? normalized.answers : [];
-      draft.sessions[index] = {
-        ...current,
-        ...normalized,
-        answers: incomingAnswers.length >= currentAnswers.length ? incomingAnswers : currentAnswers,
-        currentIndex: preserveLocalProgress ? current.currentIndex : normalized.currentIndex,
-        skippedQuestionIndexes: preserveLocalProgress ? current.skippedQuestionIndexes || [] : normalized.skippedQuestionIndexes,
-      };
-    } else {
-      draft.sessions.unshift(normalized);
-    }
-  });
-  return normalized;
-}
-
-function countGeneratedQuestions(state, subjectId) {
-  return state.sessions
-    .filter((session) => session.subjectId === subjectId)
-    .reduce((total, session) => total + (Array.isArray(session.questions) ? session.questions.length : 0), 0);
-}
-
-function upsertMistake(draft, question, result, answer) {
-  const index = draft.mistakes.findIndex((item) => item.question.id === question.id);
-  const subjectId = question.subjectId || result.subjectId;
-  const entry = {
-    id: index >= 0 ? draft.mistakes[index].id : uid("m"),
-    subjectId,
-    question: { ...question, subjectId },
-    lastAnswer: answer,
-    lastResult: result,
-    lastAccuracy: result.accuracy,
-    attempts: index >= 0 ? draft.mistakes[index].attempts + 1 : 1,
-    createdAt: index >= 0 ? draft.mistakes[index].createdAt : new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  if (index >= 0) draft.mistakes[index] = entry;
-  else draft.mistakes.unshift(entry);
-}
-
-function removeMistake(draft, questionId) {
-  draft.mistakes = draft.mistakes.filter((item) => item.question.id !== questionId);
-}
-
-function inferMistakeSubjectId(state, mistake) {
-  if (mistake.subjectId) return mistake.subjectId;
-  const session = state.sessions.find((item) => item.questions?.some((question) => question.id === mistake.question?.id));
-  return session?.subjectId || mistake.question?.subjectId || "";
-}
-
-function normalizeMistakes(state, validSubjectIds = null) {
-  return state.mistakes
-    .map((mistake) => {
-      const subjectId = inferMistakeSubjectId(state, mistake);
-      return {
-        ...mistake,
-        subjectId,
-        question: {
-          ...mistake.question,
-          subjectId,
-        },
-      };
-    })
-    .filter((mistake) => mistake.subjectId && (!validSubjectIds || validSubjectIds.has(mistake.subjectId)));
-}
-
 async function deleteSubject(subjectId) {
   return request(`/api/subjects/${subjectId}`, {
     method: "DELETE",
@@ -410,6 +290,7 @@ export const api = {
       body: JSON.stringify({ email, password, nickname }),
     });
     const user = rememberAuthenticatedUser(payload.user);
+    clearState();
     await track("register_succeeded");
     return user;
   },
@@ -421,6 +302,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     });
     const user = rememberAuthenticatedUser(payload.user);
+    clearState();
     await track("login_succeeded");
     return user;
   },
@@ -429,6 +311,7 @@ export const api = {
     await request("/api/auth/logout", {
       method: "POST",
     });
+    clearState();
   },
 
   async getCurrentUser() {
@@ -449,15 +332,24 @@ export const api = {
       const subjects = await request("/api/subjects");
       const normalizedSubjects = subjects.map(normalizeSubject);
       return {
-        user: loadState().user,
         subjects: normalizedSubjects,
         totalMistakes: normalizedSubjects.reduce((total, subject) => total + (Number(subject.mistakeCount) || 0), 0),
       };
     } catch (error) {
       console.warn("Dashboard endpoint failed:", error);
-      if (MOCK_FALLBACK_ENABLED) return mockApi.getDashboard();
       throw error;
     }
+  },
+
+  async refreshAccountData() {
+    const dashboard = await this.getDashboard();
+    const subjectIds = dashboard.subjects.map((subject) => subject.id).filter(Boolean);
+    const results = await Promise.allSettled([this.getMistakes(), ...subjectIds.map((subjectId) => this.getSubjectQuestions(subjectId))]);
+    for (const result of results) {
+      if (result.status === "rejected") console.warn("Account data refresh skipped one resource:", result.reason);
+    }
+    window.dispatchEvent(new Event("qimoshua:state-change"));
+    return dashboard;
   },
 
   async createSubject({ name, file }) {
@@ -492,74 +384,30 @@ export const api = {
     try {
       return normalizeSubject(await request(`/api/subjects/${subjectId}`));
     } catch (error) {
-      console.warn("Subject detail endpoint failed, falling back to subject list:", error);
-      try {
-        const subjects = await request("/api/subjects");
-        const subject = subjects.find((item) => item.id === subjectId);
-        if (subject) return normalizeSubject(subject);
-      } catch (listError) {
-        console.warn("Subject list fallback failed:", listError);
-      }
-      if (!MOCK_FALLBACK_ENABLED) throw error;
-      return mockApi.getSubject(subjectId);
+      console.warn("Subject detail endpoint failed:", error);
+      throw error;
     }
   },
 
   async getSubjectQuestions(subjectId) {
-    const localQuestions = questionsFromLocalSubjectSessions(subjectId);
     try {
       const remoteQuestions = await request(`/api/subjects/${subjectId}/questions`);
-      return mergeSubjectQuestions(Array.isArray(remoteQuestions) ? remoteQuestions : [], localQuestions);
+      return Array.isArray(remoteQuestions) ? remoteQuestions : [];
     } catch (error) {
-      console.warn("Subject question history endpoint failed, falling back to local sessions:", error);
-      return localQuestions;
+      console.warn("Subject question history endpoint failed:", error);
+      throw error;
     }
   },
 
   async deleteSubjectQuestion({ subjectId, questionId }) {
-    try {
-      await request(`/api/subjects/${subjectId}/questions/${questionId}`, {
-        method: "DELETE",
-      });
-    } catch (error) {
-      console.warn("Subject question delete endpoint failed, removing local copy only:", error);
-    }
-
-    updateState((draft) => {
-      for (const session of draft.sessions.filter((item) => item.subjectId === subjectId)) {
-        const removedIndexes = [];
-        session.questions = (session.questions || []).filter((question, index) => {
-          if (question.id !== questionId) return true;
-          removedIndexes.push(index);
-          return false;
-        });
-        if (removedIndexes.length && Array.isArray(session.skippedQuestionIndexes)) {
-          const removedIndexSet = new Set(removedIndexes);
-          session.skippedQuestionIndexes = session.skippedQuestionIndexes
-            .filter((index) => !removedIndexSet.has(index))
-            .map((index) => index - removedIndexes.filter((removedIndex) => removedIndex < index).length);
-        }
-      }
-      draft.answers = (draft.answers || []).filter((answer) => answer.questionId !== questionId);
-      draft.mistakes = (draft.mistakes || []).filter((mistake) => mistake.question?.id !== questionId && mistake.questionId !== questionId);
+    await request(`/api/subjects/${subjectId}/questions/${questionId}`, {
+      method: "DELETE",
     });
+    window.dispatchEvent(new Event("qimoshua:state-change"));
   },
 
   async deleteSubject(subjectId) {
     await deleteSubject(subjectId);
-    updateState((draft) => {
-      const removedQuestionIds = new Set(
-        draft.sessions
-          .filter((item) => item.subjectId === subjectId)
-          .flatMap((item) => item.questions?.map((question) => question.id) || []),
-      );
-      draft.subjects = draft.subjects.filter((item) => item.id !== subjectId);
-      draft.sessions = draft.sessions.filter((item) => item.subjectId !== subjectId);
-      draft.answers = draft.answers.filter((item) => item.subjectId !== subjectId);
-      draft.mistakes = draft.mistakes.filter(
-        (item) => item.subjectId !== subjectId && item.question?.subjectId !== subjectId && !removedQuestionIds.has(item.question?.id),
-      );
-    });
     window.dispatchEvent(new Event("qimoshua:state-change"));
   },
 
@@ -578,11 +426,8 @@ export const api = {
           mode,
         }),
       });
-      const normalizedSession = normalizeSession(session);
-      updateState((draft) => {
-        draft.sessions.unshift(normalizedSession);
-      });
-      return normalizedSession;
+      window.dispatchEvent(new Event("qimoshua:state-change"));
+      return normalizeSession(session);
     }
 
     try {
@@ -608,47 +453,26 @@ export const api = {
         mode,
       });
 
-      const normalizedSession = normalizeSession(session);
-
-      updateState((draft) => {
-        draft.sessions.unshift(normalizedSession);
-        const subject = draft.subjects.find((item) => item.id === subjectId);
-        if (subject) subject.lastPracticeAt = new Date().toISOString();
-      });
-
-      return normalizedSession;
+      window.dispatchEvent(new Event("qimoshua:state-change"));
+      return normalizeSession(session);
     } catch (error) {
       console.warn("Session creation endpoint failed:", error);
       throw new Error("\u670d\u52a1\u6b63\u5728\u6062\u590d\uff0c\u8bf7\u7a0d\u7b49\u7247\u523b\u540e\u81ea\u52a8\u91cd\u8bd5\u3002");
     }
   },
 
-  async getSession(sessionId, options = {}) {
-    const cached = cachedSession(sessionId);
-    if (cached && !options.forceRefresh) {
-      void request(`/api/sessions/${sessionId}`)
-        .then((session) => storeSession(session, { preserveLocalProgress: true }))
-        .catch((error) => console.warn("Session background refresh failed:", error));
-      return cached;
-    }
-
+  async getSession(sessionId) {
     try {
-      return storeSession(await request(`/api/sessions/${sessionId}`), { preserveLocalProgress: Boolean(options.preserveLocalProgress) });
+      return normalizeSession(await request(`/api/sessions/${sessionId}`));
     } catch (error) {
       console.warn("Session endpoint failed:", error);
-      if (!MOCK_FALLBACK_ENABLED) throw error;
-      return mockApi.getSession(sessionId);
+      throw error;
     }
   },
 
   async submitAnswer({ sessionId, questionIndex, answer, sessionSnapshot = null }) {
-    const rawSession = sessionSnapshot || loadState().sessions.find((item) => item.id === sessionId);
-    if (!rawSession) {
-      if (!MOCK_FALLBACK_ENABLED) {
-        throw new Error("练习数据没有加载完成，请返回题目页重新进入。");
-      }
-      return mockApi.submitAnswer({ sessionId, questionIndex, answer });
-    }
+    const rawSession = sessionSnapshot || (await request(`/api/sessions/${sessionId}`));
+    if (!rawSession) throw new Error("练习数据没有加载完成，请返回题目页重新进入。");
     const session = normalizeSession(rawSession);
 
     const question = session.questions[questionIndex];
@@ -686,36 +510,19 @@ export const api = {
       accuracy: result.accuracy ?? null,
     });
 
-    updateState((draft) => {
-      const current = draft.sessions.find((item) => item.id === sessionId);
-      if (!current) return;
-      current.answers = Array.isArray(current.answers) ? current.answers : [];
-      current.answers = current.answers.filter((item) => item.questionIndex !== questionIndex);
-      current.answers.push(answerRecord);
-      draft.answers.push(answerRecord);
-      if (result.isCorrect) removeMistake(draft, question.id);
-      else upsertMistake(draft, { ...question, subjectId: question.subjectId || session.subjectId }, result, answer);
-    });
-
+    window.dispatchEvent(new Event("qimoshua:state-change"));
     return answerRecord;
   },
 
   async deleteSessionAnswer({ sessionId, questionId }) {
-    updateState((draft) => {
-      const current = draft.sessions.find((item) => item.id === sessionId);
-      if (!current) return;
-      current.answers = (current.answers || []).filter((item) => item.questionId !== questionId);
-      draft.answers = (draft.answers || []).filter((item) => !(item.sessionId === sessionId && item.questionId === questionId));
-    });
-    void request(`/api/sessions/${sessionId}/answers/${questionId}`, {
+    await request(`/api/sessions/${sessionId}/answers/${questionId}`, {
       method: "DELETE",
-    }).catch((error) => console.warn("Delete answer sync failed:", error));
+    });
+    window.dispatchEvent(new Event("qimoshua:state-change"));
   },
 
-  async finishSession(sessionId) {
-    const state = loadState();
-    const session = state.sessions.find((item) => item.id === sessionId);
-    if (!session) return mockApi.finishSession(sessionId);
+  async finishSession(sessionId, sessionSnapshot = null) {
+    const session = normalizeSession(sessionSnapshot || (await request(`/api/sessions/${sessionId}`)));
 
     const skippedCount = new Set(session.skippedQuestionIndexes || []).size;
     const answeredCount = session.answers.length;
@@ -730,11 +537,6 @@ export const api = {
       mistakeCount,
     };
 
-    updateState((draft) => {
-      const current = draft.sessions.find((item) => item.id === sessionId);
-      current.completedAt = new Date().toISOString();
-      current.summary = summary;
-    });
     await request(`/api/sessions/${sessionId}/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -746,6 +548,7 @@ export const api = {
       ...summary,
     });
 
+    window.dispatchEvent(new Event("qimoshua:state-change"));
     return summary;
   },
   async getMistakes(subjectId) {
@@ -753,24 +556,16 @@ export const api = {
       const query = subjectId ? `?subjectId=${encodeURIComponent(subjectId)}` : "";
       const mistakes = await request(`/api/mistakes${query}`);
       await track("mistakes_viewed", { subjectId: subjectId || "" });
-      if (mistakes.length) return mistakes;
+      return Array.isArray(mistakes) ? mistakes : [];
     } catch (error) {
-      console.warn("Mistakes endpoint failed, falling back to local state:", error);
+      console.warn("Mistakes endpoint failed:", error);
+      throw error;
     }
-    const state = loadState();
-    const dashboard = await this.getDashboard();
-    const subjectIds = new Set(dashboard.subjects.map((subject) => subject.id));
-    const normalized = normalizeMistakes(state, subjectIds);
-
-    return normalized.filter((item) => item.subjectId && (!subjectId || item.subjectId === subjectId));
   },
 
   async deleteMistake(mistakeId) {
     await request(`/api/mistakes/${mistakeId}`, {
       method: "DELETE",
-    });
-    updateState((draft) => {
-      draft.mistakes = draft.mistakes.filter((item) => item.id !== mistakeId);
     });
     window.dispatchEvent(new Event("qimoshua:state-change"));
   },

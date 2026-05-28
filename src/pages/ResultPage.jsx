@@ -4,7 +4,6 @@ import { useNavigate, useParams } from "react-router-dom";
 import LoadingButton from "../components/LoadingButton.jsx";
 import Metric from "../components/Metric.jsx";
 import { api } from "../services/api.js";
-import { updateState } from "../services/storage.js";
 import { percent } from "../utils/format.js";
 import { repairText } from "../utils/textRepair.js";
 
@@ -320,14 +319,10 @@ export default function ResultPage() {
       setSession(latest);
       const latestQuestions = Array.isArray(latest?.questions) ? latest.questions : session.questions;
       if (index >= latestQuestions.length - 1) {
-        await api.finishSession(sessionId);
+        await api.finishSession(sessionId, latest);
         navigate(`/summary/${sessionId}`);
         return;
       }
-      updateState((draft) => {
-        const current = draft.sessions.find((item) => item.id === sessionId);
-        if (current) current.currentIndex = index + 1;
-      });
       navigate(`/quiz/${sessionId}`);
     } finally {
       setFinishing(false);
@@ -338,12 +333,6 @@ export default function ResultPage() {
     if (!record?.questionId || redoing) return;
     setRedoing(true);
     await api.deleteSessionAnswer({ sessionId, questionId: record.questionId });
-    updateState((draft) => {
-      const current = draft.sessions.find((item) => item.id === sessionId);
-      if (!current) return;
-      current.currentIndex = index;
-      current.answers = (current.answers || []).filter((item) => item.questionIndex !== index);
-    });
     navigate(`/quiz/${sessionId}`);
   }
 

@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+function sourceBlock(source, startText, endText) {
+  const start = source.indexOf(startText);
+  assert.notEqual(start, -1, `Missing block start: ${startText}`);
+  const end = endText ? source.indexOf(endText, start + startText.length) : -1;
+  return end > start ? source.slice(start, end) : source.slice(start);
+}
+
 test("subject list includes database-backed question and practice metadata", () => {
   const dbStore = readFileSync("server/services/dbStore.js", "utf8");
 
@@ -128,4 +135,47 @@ test("account data recovery failures are logged but do not block login", () => {
   assert.match(claimVisitorDataForUserBlock, /logWarn\("visitor_data_claim_failed"/);
   assert.match(claimVisitorDataForUserBlock, /try \{[\s\S]*await store\.claimSubjectData/);
   assert.match(claimVisitorDataForUserBlock, /logWarn\("subject_data_claim_failed"/);
+});
+
+test("server-backed account reads are scoped by resolved user_id", () => {
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const readMethods = [
+    ["listSubjects", "async getSubject"],
+    ["getSubject", "async deleteSubject"],
+    ["listQuestionsForSubject", "async deleteQuestionForSubject"],
+    ["getPracticeSession", "async saveAnswer"],
+    ["listMistakes", "async deleteMistake"],
+  ];
+
+  for (const [methodName, nextMethod] of readMethods) {
+    const block = sourceBlock(dbStore, `async ${methodName}({`, nextMethod);
+    assert.match(block, /const userId = await getUserId\(visitorId\)/, `${methodName} must resolve the logged-in account id`);
+    assert.match(block, /where[\s\S]*user_id = \$1|where[\s\S]*m\.user_id = \$1|where[\s\S]*s\.user_id = \$1|where[\s\S]*q\.user_id = \$1/i, `${methodName} must query by user_id`);
+  }
+});
+
+test("server-backed frontend account views do not read local study cache", () => {
+  const apiService = readFileSync("src/services/api.js", "utf8");
+  const methods = [
+    ["getDashboard", "async createSubject"],
+    ["getSubjectQuestions", "async deleteSubjectQuestion"],
+    ["getSession", "async submitAnswer"],
+    ["getMistakes", "async deleteMistake"],
+  ];
+
+  for (const [methodName, nextMethod] of methods) {
+    const block = sourceBlock(apiService, `async ${methodName}(`, nextMethod);
+    assert.doesNotMatch(block, /loadState\(/, `${methodName} must not read qimoshua_v1_state`);
+    assert.doesNotMatch(block, /mockApi\./, `${methodName} must not fall back to mock local data`);
+    assert.doesNotMatch(block, /questionsFromLocalSubjectSessions|mergeSubjectQuestions|cachedSession|normalizeMistakes/, `${methodName} must not merge local subjects, history, sessions, or mistakes`);
+  }
+});
+
+test("successful authentication refreshes account data from the server before navigation", () => {
+  const authPage = readFileSync("src/pages/AuthPage.jsx", "utf8");
+  const submitBlock = sourceBlock(authPage, "async function submit(event)", "return (");
+
+  assert.match(submitBlock, /onAuthenticated\(nextUser\)/);
+  assert.match(submitBlock, /await api\.refreshAccountData\(\)/);
+  assert.match(submitBlock, /await api\.refreshAccountData\(\)[\s\S]*navigate\(targetPath/);
 });

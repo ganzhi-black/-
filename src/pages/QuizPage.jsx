@@ -5,7 +5,6 @@ import LoadingButton from "../components/LoadingButton.jsx";
 import ProgressDots from "../components/ProgressDots.jsx";
 import VoiceAnswer from "../components/VoiceAnswer.jsx";
 import { api } from "../services/api.js";
-import { updateState } from "../services/storage.js";
 
 function questionTypeLabel(type) {
   if (type === "single") return "单选题";
@@ -77,25 +76,20 @@ export default function QuizPage() {
     setSkipLoading(true);
     const nextIndex = currentIndex + 1;
     const isLast = currentIndex >= questions.length - 1;
-
-    updateState((draft) => {
-      const current = draft.sessions.find((item) => item.id === sessionId);
-      if (!current) return;
-      current.skippedQuestionIndexes = Array.from(new Set([...(current.skippedQuestionIndexes || []), currentIndex]));
-      if (!isLast) current.currentIndex = nextIndex;
-    });
+    const skippedQuestionIndexes = Array.from(new Set([...(session.skippedQuestionIndexes || []), currentIndex]));
+    const nextSession = {
+      ...session,
+      currentIndex: isLast ? currentIndex : nextIndex,
+      skippedQuestionIndexes,
+    };
 
     if (isLast) {
-      await api.finishSession(sessionId);
+      await api.finishSession(sessionId, nextSession);
       navigate(`/summary/${sessionId}`);
       return;
     }
 
-    setSession((current) => ({
-      ...current,
-      currentIndex: nextIndex,
-      skippedQuestionIndexes: Array.from(new Set([...(current?.skippedQuestionIndexes || []), currentIndex])),
-    }));
+    setSession(nextSession);
     setAnswer("");
     setSkipLoading(false);
   }

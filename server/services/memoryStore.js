@@ -27,6 +27,23 @@ export function createMemoryStore() {
   const analyticsEvents = [];
 
   return {
+    claimVisitorData({ visitorId, userId }) {
+      const ownerId = normalizeVisitorId(visitorId);
+      if (!visitorId || !userId || ownerId === userId) return { claimed: false };
+
+      const collections = [subjects, documents, chunks, savedQuestions, practiceSessions, answers, mistakes, analyticsEvents];
+      let claimedCount = 0;
+      for (const collection of collections) {
+        for (const item of collection) {
+          if (item.visitorId === ownerId) {
+            item.visitorId = userId;
+            claimedCount += 1;
+          }
+        }
+      }
+      return { claimed: claimedCount > 0, counts: { records: claimedCount } };
+    },
+
     createUser({ email, passwordHash, nickname }) {
       const normalizedEmail = String(email || "").trim().toLowerCase();
       if (users.some((user) => user.email === normalizedEmail)) {

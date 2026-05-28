@@ -218,6 +218,20 @@ function sessionCookieOptions() {
 }
 
 async function createLoginSession(req, res, user) {
+  if (store.claimVisitorData) {
+    const claimResult = await store.claimVisitorData({
+      visitorId: req.get("x-visitor-id"),
+      userId: user.id,
+    });
+    if (claimResult?.claimed) {
+      req.logStep?.("visitor_data_claimed", {
+        userId: user.id,
+        visitorUserId: claimResult.visitorUserId || null,
+        counts: claimResult.counts || {},
+      });
+    }
+  }
+
   const token = crypto.randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
   await store.createAuthSession({

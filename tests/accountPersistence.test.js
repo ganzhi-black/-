@@ -41,3 +41,25 @@ test("summary page does not redirect completed sessions back to the quiz", () =>
 
   assert.match(summaryPage, /session\.summary\s*\|\|\s*session\.completedAt/);
 });
+
+test("login and register claim existing visitor-owned study data for the account", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const memoryStore = readFileSync("server/services/memoryStore.js", "utf8");
+
+  assert.match(dbStore, /async claimVisitorData\(\{ visitorId, userId \}\)/);
+  assert.match(dbStore, /visitor:\$\{normalizeVisitorId\(visitorId\)\}/);
+  assert.match(dbStore, /"subjects"/);
+  assert.match(dbStore, /"documents"/);
+  assert.match(dbStore, /"document_chunks"/);
+  assert.match(dbStore, /"questions"/);
+  assert.match(dbStore, /"practice_sessions"/);
+  assert.match(dbStore, /"answers"/);
+  assert.match(dbStore, /"mistakes"/);
+  assert.match(dbStore, /"analytics_events"/);
+  assert.match(dbStore, /update \$\{tableName\} set user_id = \$1 where user_id = \$2/);
+  assert.match(dbStore, /delete from mistakes visitor_mistakes/);
+
+  assert.match(memoryStore, /claimVisitorData\(\{ visitorId, userId \}\)/);
+  assert.match(server, /await store\.claimVisitorData\(\{\s*visitorId: req\.get\("x-visitor-id"\),\s*userId: user\.id,\s*\}\)/);
+});

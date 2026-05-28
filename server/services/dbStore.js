@@ -100,6 +100,12 @@ async function ensureVisitorUser(pool, visitorId) {
   return created.rows[0].id;
 }
 
+async function findExistingVisitorUserId(client, visitorId) {
+  const nickname = `visitor:${normalizeVisitorId(visitorId)}`;
+  const existing = await client.query("select id from users where nickname = $1 limit 1", [nickname]);
+  return existing.rows[0]?.id || null;
+}
+
 async function ensureSchema(pool) {
   await pool.query("alter table users add column if not exists email text");
   await pool.query("alter table users add column if not exists password_hash text");
@@ -232,6 +238,62 @@ export async function createDbStore(databaseUrl) {
   }
 
   return {
+    async claimVisitorData({ visitorId, userId }) {
+      if (!visitorId || !userId || String(visitorId) === String(userId)) {
+        return { claimed: false };
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        const visitorUserId = await findExistingVisitorUserId(client, visitorId);
+        if (!visitorUserId || String(visitorUserId) === String(userId)) {
+          await client.query("commit");
+          return { claimed: false };
+        }
+
+        await client.query(
+          `
+            delete from mistakes visitor_mistakes
+            using mistakes account_mistakes
+            where visitor_mistakes.user_id = $2
+              and account_mistakes.user_id = $1
+              and account_mistakes.question_id = visitor_mistakes.question_id
+          `,
+          [userId, visitorUserId],
+        );
+
+        const tableNames = [
+          "subjects",
+          "documents",
+          "document_chunks",
+          "questions",
+          "practice_sessions",
+          "answers",
+          "mistakes",
+          "analytics_events",
+        ];
+        const counts = {};
+
+        for (const tableName of tableNames) {
+          const result = await client.query(`update ${tableName} set user_id = $1 where user_id = $2`, [userId, visitorUserId]);
+          counts[tableName] = result.rowCount;
+        }
+
+        await client.query("commit");
+        return {
+          claimed: Object.values(counts).some((count) => count > 0),
+          visitorUserId,
+          counts,
+        };
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
     async createUser({ email, passwordHash, nickname }) {
       const normalizedEmail = String(email || "").trim().toLowerCase();
       const result = await pool.query(

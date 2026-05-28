@@ -99,7 +99,8 @@ export function createMemoryStore() {
       const user = users.find((item) => item.id === session.user_id);
       if (!user) return null;
       return {
-        id: session.id,
+        id: user.id,
+        session_id: session.id,
         user_id: user.id,
         email: user.email,
         nickname: user.nickname,

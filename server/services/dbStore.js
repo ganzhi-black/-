@@ -426,7 +426,8 @@ export async function createDbStore(databaseUrl) {
         pool,
         `
           select
-            s.id,
+            s.id as session_id,
+            s.user_id as id,
             s.user_id,
             s.expires_at,
             u.email,

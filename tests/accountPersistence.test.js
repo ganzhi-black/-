@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { createMemoryStore } from "../server/services/memoryStore.js";
 
 function sourceBlock(source, startText, endText) {
   const start = source.indexOf(startText);
@@ -135,6 +136,36 @@ test("account data recovery failures are logged but do not block login", () => {
   assert.match(claimVisitorDataForUserBlock, /logWarn\("visitor_data_claim_failed"/);
   assert.match(claimVisitorDataForUserBlock, /try \{[\s\S]*await store\.claimSubjectData/);
   assert.match(claimVisitorDataForUserBlock, /logWarn\("subject_data_claim_failed"/);
+});
+
+test("auth sessions expose the account user id instead of the session id", () => {
+  const server = readFileSync("server/index.js", "utf8");
+  const dbStore = readFileSync("server/services/dbStore.js", "utf8");
+  const memoryStoreSource = readFileSync("server/services/memoryStore.js", "utf8");
+  const publicUserBlock = sourceBlock(server, "function publicUser(user)", "function sessionCookieOptions");
+  const dbAuthSessionBlock = sourceBlock(dbStore, "async getAuthSession(tokenHash)", "async deleteAuthSession");
+
+  const memoryStore = createMemoryStore();
+  const user = memoryStore.createUser({
+    email: "sync-test@example.com",
+    passwordHash: "hash",
+    nickname: "Sync Test",
+  });
+  memoryStore.createAuthSession({
+    userId: user.id,
+    tokenHash: "session-token",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+
+  const session = memoryStore.getAuthSession("session-token");
+  assert.equal(session.user_id, user.id);
+  assert.equal(session.id, user.id);
+
+  assert.match(publicUserBlock, /id:\s*user\.user_id\s*\|\|\s*user\.id/);
+  assert.match(dbAuthSessionBlock, /s\.id\s+as\s+session_id/i);
+  assert.match(dbAuthSessionBlock, /s\.user_id\s+as\s+id/i);
+  assert.doesNotMatch(dbAuthSessionBlock, /\n\s*s\.id,\s*\n\s*s\.user_id,/);
+  assert.match(memoryStoreSource, /id:\s*user\.id,\s*\n\s*session_id:\s*session\.id/);
 });
 
 test("server-backed account reads are scoped by resolved user_id", () => {

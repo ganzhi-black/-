@@ -197,7 +197,7 @@ function isTransientBackendError(error) {
 function publicUser(user) {
   const email = user.email || "";
   return {
-    id: user.id || user.user_id,
+    id: user.user_id || user.id,
     email,
     nickname: user.nickname,
     createdAt: user.created_at,

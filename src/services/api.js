@@ -2,11 +2,27 @@ import { api as mockApi } from "./mockApi.js";
 import { loadState, updateState } from "./storage.js";
 import { repairText } from "../utils/textRepair.js";
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/+$/, "");
 const DEFAULT_PRODUCTION_API_BASE_URL = "https://web-production-60950.up.railway.app";
 const MOCK_FALLBACK_ENABLED = !import.meta.env.PROD || import.meta.env.VITE_ENABLE_MOCK_FALLBACK === "true";
 const DEFAULT_RETRY_COUNT = 2;
 const RETRY_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 522, 523, 524]);
+
+function isRetiredRailwayApiUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname.startsWith("api-production-") && parsed.hostname.endsWith(".up.railway.app");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeConfiguredUrl(value) {
+  const normalized = String(value || "").trim().replace(/\/+$/, "");
+  if (!normalized || isRetiredRailwayApiUrl(normalized)) return "";
+  return normalized;
+}
+
+const configuredApiBaseUrl = normalizeConfiguredUrl(import.meta.env.VITE_API_BASE_URL);
 
 function localApiBaseUrl() {
   if (typeof window === "undefined") return "http://localhost:8787";
@@ -15,7 +31,7 @@ function localApiBaseUrl() {
 }
 
 export const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.PROD ? DEFAULT_PRODUCTION_API_BASE_URL : localApiBaseUrl());
-const configuredRealtimeAsrUrl = import.meta.env.VITE_REALTIME_ASR_URL?.trim();
+const configuredRealtimeAsrUrl = normalizeConfiguredUrl(import.meta.env.VITE_REALTIME_ASR_URL);
 const VISITOR_ID_KEY = "qimoshua:visitor-id";
 
 function createVisitorId() {

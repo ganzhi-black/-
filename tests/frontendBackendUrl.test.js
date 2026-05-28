@@ -10,6 +10,8 @@ test("frontend production API default points at the current Railway backend", ()
 
   assert.match(apiService, new RegExp(`https://${CURRENT_RAILWAY_API_URL}`));
   assert.doesNotMatch(apiService, new RegExp(OLD_RAILWAY_API_URL));
+  assert.match(apiService, /isRetiredRailwayApiUrl/);
+  assert.match(apiService, /api-production-/);
 });
 
 test("environment example does not point developers at the retired Railway backend", () => {

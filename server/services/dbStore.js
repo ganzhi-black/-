@@ -42,6 +42,9 @@ function toSubject(row) {
     sourceFileSize: Number(row.source_file_size || 0),
     documentCount: Number(row.document_count || 0),
     chunkCount: Number(row.chunk_count || 0),
+    generatedQuestionCount: Number(row.generated_question_count || 0),
+    lastPracticeAt: row.last_practice_at || null,
+    mistakeCount: Number(row.mistake_count || 0),
   };
 }
 
@@ -334,7 +337,10 @@ export async function createDbStore(databaseUrl) {
             latest.file_name as source_file_name,
             latest.file_size as source_file_size,
             count(distinct d.id) as document_count,
-            count(c.id) as chunk_count
+            count(distinct c.id) as chunk_count,
+            coalesce(q_stats.generated_question_count, 0) as generated_question_count,
+            practice_stats.last_practice_at,
+            coalesce(mistake_stats.mistake_count, 0) as mistake_count
           from subjects s
           left join documents d on d.subject_id = s.id
           left join document_chunks c on c.subject_id = s.id
@@ -345,8 +351,23 @@ export async function createDbStore(databaseUrl) {
             order by created_at desc
             limit 1
           ) latest on true
+          left join lateral (
+            select count(distinct q.id) as generated_question_count
+            from questions q
+            where q.user_id = s.user_id and q.subject_id = s.id
+          ) q_stats on true
+          left join lateral (
+            select max(ps.started_at) as last_practice_at
+            from practice_sessions ps
+            where ps.user_id = s.user_id and ps.subject_id = s.id
+          ) practice_stats on true
+          left join lateral (
+            select count(distinct m.id) as mistake_count
+            from mistakes m
+            where m.user_id = s.user_id and m.subject_id = s.id
+          ) mistake_stats on true
           where s.user_id = $1
-          group by s.id, latest.file_name, latest.file_size
+          group by s.id, latest.file_name, latest.file_size, q_stats.generated_question_count, practice_stats.last_practice_at, mistake_stats.mistake_count
           order by s.created_at desc
         `,
         [userId],
@@ -366,7 +387,10 @@ export async function createDbStore(databaseUrl) {
             latest.file_name as source_file_name,
             latest.file_size as source_file_size,
             count(distinct d.id) as document_count,
-            count(c.id) as chunk_count
+            count(distinct c.id) as chunk_count,
+            coalesce(q_stats.generated_question_count, 0) as generated_question_count,
+            practice_stats.last_practice_at,
+            coalesce(mistake_stats.mistake_count, 0) as mistake_count
           from subjects s
           left join documents d on d.subject_id = s.id
           left join document_chunks c on c.subject_id = s.id
@@ -377,8 +401,23 @@ export async function createDbStore(databaseUrl) {
             order by created_at desc
             limit 1
           ) latest on true
+          left join lateral (
+            select count(distinct q.id) as generated_question_count
+            from questions q
+            where q.user_id = s.user_id and q.subject_id = s.id
+          ) q_stats on true
+          left join lateral (
+            select max(ps.started_at) as last_practice_at
+            from practice_sessions ps
+            where ps.user_id = s.user_id and ps.subject_id = s.id
+          ) practice_stats on true
+          left join lateral (
+            select count(distinct m.id) as mistake_count
+            from mistakes m
+            where m.user_id = s.user_id and m.subject_id = s.id
+          ) mistake_stats on true
           where s.user_id = $1 and s.id = $2
-          group by s.id, latest.file_name, latest.file_size
+          group by s.id, latest.file_name, latest.file_size, q_stats.generated_question_count, practice_stats.last_practice_at, mistake_stats.mistake_count
         `,
         [userId, subjectId],
       );

@@ -418,9 +418,7 @@ async function getOrGenerateQuestions({ visitorId, subjectId, types, amount, log
     subjectId,
     documentHash: documentHashes[0] || null,
   });
-  void store
-    .saveQuestions({ visitorId, subjectId, questions: savedQuestions, documentHash: documentHashes[0] || null })
-    .catch((error) => logError("background_save_failed", { visitorId, subjectId, error }));
+  await store.saveQuestions({ visitorId, subjectId, questions: savedQuestions, documentHash: documentHashes[0] || null });
   const savedAt = performance.now();
   const timings = {
     retrievalMs: Math.round(retrievedAt - startedAt),
@@ -783,9 +781,7 @@ app.post("/api/sessions", async (req, res, next) => {
     const result = await getOrGenerateQuestions({ visitorId: req.visitorId, subjectId, types, amount, logStep: req.logStep });
     const session = createSessionPayload({ subjectId, mode, questions: result.questions });
     if (store.createPracticeSession) {
-      void store
-        .createPracticeSession({ visitorId: req.visitorId, session })
-        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), subjectId, sessionId: session.id, error }));
+      await store.createPracticeSession({ visitorId: req.visitorId, session });
     }
     req.logStep("session_create_completed", {
       subjectId,
@@ -814,9 +810,7 @@ app.post("/api/sessions/retry", async (req, res, next) => {
     const session = createSessionPayload({ subjectId, mode, questions });
     session.retryMistakeIds = questionIds;
     if (store.createPracticeSession) {
-      void store
-        .createPracticeSession({ visitorId: req.visitorId, session })
-        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), subjectId, sessionId: session.id, error }));
+      await store.createPracticeSession({ visitorId: req.visitorId, session });
     }
     req.logStep("retry_session_created", {
       subjectId,
@@ -883,15 +877,13 @@ app.post("/api/answers/grade", async (req, res, next) => {
 
     let savedAnswer = null;
     if (sessionId && store.saveAnswer) {
-      void store
-        .saveAnswer({
-          visitorId: req.visitorId,
-          sessionId,
-          question,
-          answer,
-          result,
-        })
-        .catch((error) => logError("background_save_failed", { ...requestLogBase(req), sessionId, questionId: question.id, error }));
+      savedAnswer = await store.saveAnswer({
+        visitorId: req.visitorId,
+        sessionId,
+        question,
+        answer,
+        result,
+      });
     }
     const savedAt = performance.now();
 

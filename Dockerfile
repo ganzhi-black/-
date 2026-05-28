@@ -10,7 +10,7 @@ COPY package*.json ./
 RUN npm ci
 
 COPY server/requirements.txt ./server/requirements.txt
-RUN python3 -m pip install --break-system-packages --target /app/server/python-vendor -r server/requirements.txt
+RUN python3 -m pip install --break-system-packages --index-url https://mirrors.aliyun.com/pypi/simple/ --target /app/server/python-vendor -r server/requirements.txt
 
 COPY . .
 

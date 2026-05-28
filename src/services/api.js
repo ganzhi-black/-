@@ -387,23 +387,11 @@ export const api = {
   async getDashboard() {
     try {
       const subjects = await request("/api/subjects");
-      const fallback = await mockApi.getDashboard();
       const normalizedSubjects = subjects.map(normalizeSubject);
-      const subjectIds = new Set(normalizedSubjects.map((subject) => subject.id));
-      const state = loadState();
-      const mistakes = normalizeMistakes(state, subjectIds);
-      const mistakeCounts = mistakes.reduce((counts, mistake) => {
-        counts.set(mistake.subjectId, (counts.get(mistake.subjectId) || 0) + 1);
-        return counts;
-      }, new Map());
       return {
-        ...fallback,
-        subjects: normalizedSubjects.map((subject) => ({
-          ...subject,
-          mistakeCount: mistakeCounts.get(subject.id) || 0,
-          generatedQuestionCount: countGeneratedQuestions(state, subject.id),
-        })),
-        totalMistakes: mistakes.length,
+        user: loadState().user,
+        subjects: normalizedSubjects,
+        totalMistakes: normalizedSubjects.reduce((total, subject) => total + (Number(subject.mistakeCount) || 0), 0),
       };
     } catch (error) {
       console.warn("Dashboard endpoint failed:", error);
@@ -687,19 +675,16 @@ export const api = {
       current.completedAt = new Date().toISOString();
       current.summary = summary;
     });
-    void request(`/api/sessions/${sessionId}/finish`, {
+    await request(`/api/sessions/${sessionId}/finish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(summary),
-    })
-      .then(() => {
-        track("practice_finished", {
-          sessionId,
-          subjectId: session.subjectId,
-          ...summary,
-        });
-      })
-      .catch((error) => console.warn("Finish session sync failed:", error));
+    });
+    await track("practice_finished", {
+      sessionId,
+      subjectId: session.subjectId,
+      ...summary,
+    });
 
     return summary;
   },

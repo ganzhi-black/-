@@ -57,6 +57,7 @@ export default function SummaryPage() {
 
   useEffect(() => {
     if (!session) return;
+    if (session.summary || session.completedAt) return;
     const total = Array.isArray(session.questions) ? session.questions.length : 0;
     const answered = Math.max(Number(session.summary?.answeredCount || 0), Array.isArray(session.answers) ? session.answers.length : 0);
     const skipped = Math.max(Number(session.summary?.skippedCount || 0), new Set(session.skippedQuestionIndexes || []).size);
